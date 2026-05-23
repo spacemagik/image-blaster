@@ -16,11 +16,18 @@ interface Props {
   metricScaleFactor?: number
   shadowOpacity?: number
   shadowColor?: string
+  /**
+   * Always mount an invisible ShadowMaterial clone of the collider in parallel with
+   * whatever visible render mode is active. Used by Wizard mode so the floor catches
+   * the character's real-time shadow without forcing the user into Lit object render
+   * mode (the wireframe / shaded modes don't render a shadow catcher otherwise).
+   */
+  forceShadowCatcher?: boolean
 }
 
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
-export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor }: Props) {
+export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor, forceShadowCatcher }: Props) {
   const { scene: rawScene } = useGLTF(url)
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const worldRenderMode = useDebugStore((s) => s.worldRenderMode)
@@ -45,7 +52,7 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
     shadowMat.needsUpdate = true
   }, [shadowColor, shadowMat, shadowOpacity])
 
-  const { scene, overlayScene, dropTargetScene } = useMemo(() => {
+  const { scene, overlayScene, dropTargetScene, shadowCatcherScene } = useMemo(() => {
     const dropTargetScene = cloneSkeleton(rawScene)
     dropTargetScene.traverse((child) => {
       child.layers.set(DROP_TARGET_LAYER)
@@ -54,8 +61,23 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
       scene: cloneSkeleton(rawScene),
       overlayScene: cloneSkeleton(rawScene),
       dropTargetScene,
+      shadowCatcherScene: cloneSkeleton(rawScene),
     }
   }, [rawScene])
+
+  // Configure the parallel shadow-catcher clone — applied unconditionally so it's ready
+  // the moment `forceShadowCatcher` flips on. ShadowMaterial is transparent everywhere
+  // except shadowed pixels, so leaving the clone mounted always is visually a no-op
+  // (we still gate the JSX below on `forceShadowCatcher` to avoid an extra draw pass).
+  useEffect(() => {
+    shadowCatcherScene.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return
+      child.material = shadowMat
+      child.castShadow = false
+      child.receiveShadow = true
+      child.raycast = ignoreRaycast
+    })
+  }, [shadowCatcherScene, shadowMat])
 
   const showMesh = worldRenderMode !== WorldRenderMode.ObjectOnly
 
@@ -107,6 +129,14 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
         position={[0, normalizedGroundPlaneOffset, 0]}
         scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
       />
+      {forceShadowCatcher && (
+        <primitive
+          object={shadowCatcherScene}
+          rotation={[normalizedRotation, 0, 0]}
+          position={[0, normalizedGroundPlaneOffset, 0]}
+          scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
+        />
+      )}
     </>
   )
 }

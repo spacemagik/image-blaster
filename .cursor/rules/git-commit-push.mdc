@@ -1,0 +1,35 @@
+---
+description: When asked to commit locally, also push to remote
+alwaysApply: true
+---
+
+# Commit + Push Together
+
+When the user asks you to commit changes, treat "commit" as shorthand for
+"commit and push". After a successful local commit, immediately run
+`git push` to the current branch's tracking remote.
+
+## Workflow
+
+1. Stage and commit per the standard `committing-changes-with-git` protocol.
+2. Verify the commit succeeded (`git status` shows clean / "ahead of origin").
+3. Push to the tracking remote (`git push`). If the branch has no upstream,
+   use `git push -u origin HEAD`.
+4. Report both the commit SHA and the push result to the user.
+
+## Exceptions
+
+Skip the push (and tell the user why) if:
+
+- The user explicitly says "commit only" or "don't push".
+- The current branch is `main` / `master` AND pushing would force-push.
+- The push would require `--force` or `--force-with-lease` (ask first).
+- Pre-push hooks fail (report the failure; do not retry with `--no-verify`
+  unless the user asks).
+
+## Don'ts
+
+- Never `git push --force` (or `--force-with-lease`) without an explicit
+  request from the user.
+- Never skip hooks (`--no-verify`) without an explicit request.
+- Never push commits the user didn't ask to create.

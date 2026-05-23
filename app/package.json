@@ -19,6 +19,7 @@
     "@react-three/rapier": "^2.2.0",
     "@sparkjsdev/spark": "^2.0.0",
     "leva": "^0.10.1",
+    "lil-gui": "^0.20.0",
     "postprocessing": "^6.36.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",

@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { ObjectRenderMode, ViewerQuality, WorldRenderMode } from '../types/world'
 
-export type ControllerMode = 'fly' | 'fps'
+export type ControllerMode = 'fly' | 'fps' | 'wizard'
 
 function defaultViewerQuality() {
   if (typeof window === 'undefined') return ViewerQuality.High
@@ -87,7 +87,7 @@ export const useDebugStore = create<DebugStore>()(
       setShowOrigin: (showOrigin) => set({ showOrigin }),
       butterfliesEnabled: false,
       setButterfliesEnabled: (butterfliesEnabled) => set({ butterfliesEnabled }),
-      controllerMode: 'fly' as ControllerMode,
+      controllerMode: 'wizard' as ControllerMode,
       setControllerMode: (controllerMode) => set({ controllerMode }),
       flyMouseSensitivity: 0.003,
       setFlyMouseSensitivity: (flyMouseSensitivity) => set({ flyMouseSensitivity }),
@@ -128,12 +128,13 @@ export const useDebugStore = create<DebugStore>()(
     }),
     {
       name: 'image-blaster-debug',
-      version: 11,
+      version: 12,
       migrate: (persisted, version) => {
         if (!persisted || typeof persisted !== 'object') return persisted
         const state = persisted as Record<string, unknown>
         if (state.controllerMode === 'butterfly') state.controllerMode = 'fly'
         if (version < 10) state.butterfliesEnabled = true
+        if (version < 12 && state.controllerMode === 'fps') state.controllerMode = 'wizard'
         delete state.hotReloadEnabled
         return state
       },

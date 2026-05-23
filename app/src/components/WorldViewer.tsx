@@ -9,6 +9,10 @@ import { WorldCollider } from '../modules/collider/WorldCollider'
 import { GroundPlane } from '../modules/collider/GroundPlane'
 import { CharacterController, type CharacterControllerHandle } from '../modules/character/CharacterController'
 import { FlyController, type FlyControllerHandle } from '../modules/character/FlyController'
+import { WizardController, type WizardControllerHandle } from '../modules/character/WizardController'
+import { WizardGui } from '../modules/character/WizardGui'
+import { WizardLighting } from '../modules/character/WizardLighting'
+import { useWizardTuning } from '../modules/character/wizardTuning'
 import { ButterflyScene } from '../modules/butterfly/ButterflyScene'
 import { ObjectGrid } from '../modules/scene/ObjectGrid'
 import { PlacementEditorOverlay, PlacementEditorScene, usePlacementEditor } from '../modules/scene/PlacementEditor'
@@ -22,12 +26,22 @@ import { WorldRenderMode, ObjectRenderMode, ViewerQuality, type Vec3Tuple, type 
 import { AppButton } from './AppButton'
 import { chrome } from './AppChrome'
 
-type CharHandle = CharacterControllerHandle | FlyControllerHandle
+type CharHandle = CharacterControllerHandle | FlyControllerHandle | WizardControllerHandle
 const DEFAULT_ENVIRONMENT_URL = '/hdri.jpg'
 const DEFAULT_WORLD_SEMANTICS = {
   metric_scale_factor: 1,
   ground_plane_offset: 0,
   flip_y: true,
+}
+
+/**
+ * Convert a lil-gui `addColor` RGB tuple (0–1 floats) into the `#rrggbb` hex string
+ * format that `shadowCatcherColor()` / WorldCollider's ShadowMaterial expects.
+ */
+function rgbTupleToHex([r, g, b]: [number, number, number]): string {
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)))
+  const hex = (v: number) => clamp(v).toString(16).padStart(2, '0')
+  return `#${hex(r)}${hex(g)}${hex(b)}`
 }
 
 function sunPositionFromRotation(rotation: Vec3Tuple): Vec3Tuple {
@@ -206,12 +220,24 @@ export function WorldViewer({
     ? true
     : sceneGroundPlaneColliderEnabled
   const sceneShadowCatcherOpacity = editing ? placementEditor.shadowCatcherOpacity : sceneProject?.shadowCatcherOpacity
-  const activeShadowCatcherOpacity = shadowCatcherOpacity(sceneShadowCatcherOpacity ?? DEFAULT_SHADOW_CATCHER_OPACITY)
+  const sceneShadowCatcherOpacityValue = shadowCatcherOpacity(sceneShadowCatcherOpacity ?? DEFAULT_SHADOW_CATCHER_OPACITY)
   const sceneShadowCatcherColor = editing ? placementEditor.shadowCatcherColor : sceneProject?.shadowCatcherColor
-  const activeShadowCatcherColor = shadowCatcherColor(sceneShadowCatcherColor ?? DEFAULT_SHADOW_CATCHER_COLOR)
+  const sceneShadowCatcherColorValue = shadowCatcherColor(sceneShadowCatcherColor ?? DEFAULT_SHADOW_CATCHER_COLOR)
+  // Wizard mode overrides the scene's shadow-catcher tint with the values the user is
+  // dragging in the lil-gui Shadows folder, so "Collider GLB shadow tint" actually drives
+  // the on-floor shadow color/opacity (porting astronaut's `colliderGlbShadow*` knobs).
+  // `activeControllerMode` is declared a few lines below; we read it lazily via the
+  // `isWizardMode` derivation right after it's available.
+  const wizardShadowColor = useWizardTuning((s) => s.colliderGlbShadowColor)
+  const wizardShadowOpacity = useWizardTuning((s) => s.colliderGlbShadowOpacity)
   const objectPlacements = sceneProject?.instances ?? placementEditor.instances
   const objectPhysicsAssets = sceneProject?.instances.length ? allObjectAssets : desiredObjectAssets
   const activeControllerMode = editing ? 'fly' : controllerMode
+  const isWizardMode = activeControllerMode === 'wizard'
+  const activeShadowCatcherOpacity = isWizardMode ? wizardShadowOpacity : sceneShadowCatcherOpacityValue
+  const activeShadowCatcherColor = isWizardMode
+    ? rgbTupleToHex(wizardShadowColor)
+    : sceneShadowCatcherColorValue
   const hoveredObjectAsset = hoveredObjectAssetId
     ? allObjectAssets.find((asset) => asset.assetId === hoveredObjectAssetId)
       ?? desiredObjectAssets.find((asset) => asset.assetId === hoveredObjectAssetId)
@@ -231,13 +257,22 @@ export function WorldViewer({
         camera={{ fov: 75, near: 0.1, far: 1000 }}
         className="w-full h-full"
         gl={{ antialias: false }}
-        shadows={isHighQuality}
+        // Wizard mode requires shadows even in Low quality — the astronaut character
+        // controller demo always runs with renderer.shadowMap.enabled = true so the
+        // character casts a real-time shadow on the splat floor. Without this the
+        // WizardLighting sun won't render shadows at all in Low mode.
+        shadows={isHighQuality || activeControllerMode === 'wizard'}
       >
         <Suspense fallback={null}>
           <AudioManager urls={worldSfxUrls} />
           <Physics key={`${desiredSlug}:${controllerResetToken}`} gravity={[0, -9.81, 0]}>
             {activeControllerMode === 'fly' ? (
               <FlyController ref={charRef as React.RefObject<FlyControllerHandle>} preserveCameraOnMount={editing} />
+            ) : activeControllerMode === 'wizard' ? (
+              <>
+                <WizardController ref={charRef as React.RefObject<WizardControllerHandle>} />
+                <WizardLighting />
+              </>
             ) : (
               <CharacterController ref={charRef as React.RefObject<CharacterControllerHandle>} />
             )}
@@ -251,6 +286,7 @@ export function WorldViewer({
                     metricScaleFactor={activeMetricScaleFactor}
                     shadowOpacity={activeShadowCatcherOpacity}
                     shadowColor={activeShadowCatcherColor}
+                    forceShadowCatcher={isWizardMode}
                   />
                 </Suspense>
               </OptionalAssetBoundary>
@@ -284,7 +320,10 @@ export function WorldViewer({
             </OptionalAssetBoundary>
           )}
           <directionalLight
-            castShadow={isHighQuality && activeSunIntensity > 0}
+            // WizardLighting owns shadow casting in wizard mode (its sun follows the
+            // character feet for sharp player-relative shadows); turn the static scene
+            // light's shadow off there to avoid double-casting.
+            castShadow={isHighQuality && activeSunIntensity > 0 && activeControllerMode !== 'wizard'}
             color={sunColor}
             intensity={activeSunIntensity}
             position={activeSunPosition}
@@ -311,6 +350,7 @@ export function WorldViewer({
           {isHighQuality && <PostProcessing />}
         </Suspense>
       </Canvas>
+      {uiVisible && activeControllerMode === 'wizard' && <WizardGui />}
       {uiVisible && (
         <SourceImageControls
           activeSourceImageUrl={activePreviewImageUrl}

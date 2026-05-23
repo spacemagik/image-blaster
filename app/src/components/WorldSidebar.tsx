@@ -10,6 +10,7 @@ import { AppButton } from './AppButton'
 import { ChromeThumbnail, chrome } from './AppChrome'
 
 const CONTROLLER_MODES: readonly { mode: ControllerMode; label: string }[] = [
+  { mode: 'wizard', label: 'Wizard' },
   { mode: 'fly', label: 'Fly' },
   { mode: 'fps', label: 'FPS' },
 ]

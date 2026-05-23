@@ -272,7 +272,7 @@ export function DebugPanel() {
     }),
     controllerMode: {
       value: controllerMode,
-      options: { Fly: 'fly', FPS: 'fps' },
+      options: { Wizard: 'wizard', Fly: 'fly', FPS: 'fps' },
       label: 'Controller',
       onChange: (v: string) => setControllerMode(v as typeof controllerMode),
     },
