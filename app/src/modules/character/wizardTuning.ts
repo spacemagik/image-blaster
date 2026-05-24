@@ -99,6 +99,7 @@ export interface WizardTuning {
   // tune this per world or the character can spawn above the ceiling or below the floor.
   spawnFeetY: number
 
+
   // Scene-object placements (astronaut demo had Flag 2 + Rocket)
   flag2X: number
   flag2Y: number
@@ -130,14 +131,14 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   controlMovementDuringJump: true,
   enableCharacterInertia: true,
 
-  dogHeight: 2.8,
+  dogHeight: 7.9,
   // The astronaut demo defaults this to 180 because its dog model's walk cycle points
   // legs in -mesh-Z. silo.glb (and previously wizard.glb) walks toward +mesh-Z, so 0 is
   // the correct default. If you swap in a different .glb that faces the opposite way,
   // slide the Mesh yaw (°) GUI control by ±180.
   dogYawDeg: 0,
   dogOffsetX: 0,
-  dogOffsetY: 0,
+  dogOffsetY: -3.86,
   dogOffsetZ: 0,
   dogTurnSpeed: 6,
   dogWalkSpeedThreshold: 0.08,
@@ -214,7 +215,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
     {
       name: 'image-blaster-wizard-tuning',
       // Bumped on schema change to drop stale persisted values from earlier prototypes.
-      version: 5,
+      version: 13,
       partialize: (s) => {
         const {
           resetToken: _resetToken,

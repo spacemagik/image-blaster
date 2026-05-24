@@ -864,5 +864,12 @@ function worldsPlugin(): Plugin {
 
 export default defineConfig({
   plugins: [react(), worldsPlugin()],
-  server: { fs: { allow: ['..'] } },
+  server: {
+    fs: { allow: ['..'] },
+    // Polling-based file watcher. Native fsevents on macOS sometimes silently
+    // stops firing under repo paths that contain spaces (e.g. "Image Blaster"),
+    // leaving HMR stuck on whatever the server had at startup. Polling is a
+    // touch heavier on CPU but reliable.
+    watch: { usePolling: true, interval: 200 },
+  },
 })
