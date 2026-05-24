@@ -12,8 +12,22 @@ app/dist/
 app/node_modules/
 app/.vite/
 
+# Game project (vanilla three.js + Spark 2.0)
+game/dist/
+game/node_modules/
+game/.vite/
+# Splats can be hundreds of MB — over GitHub's 100MB file limit.
+game/public/*.spz
+
 # Environment
 .env
 
 # OS
 .DS_Store
+
+# Splat-to-mesh tool outputs (big intermediate GLBs)
+tools/*.glb
+tools/*.spz
+
+# Vendored copy of @sparkjsdev/spark for the standalone tools/splat2mesh.html
+lib/
