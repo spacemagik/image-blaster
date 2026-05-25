@@ -1,6 +1,4 @@
-import { Component, Suspense, useRef, useEffect, useState, type ReactNode } from 'react'
-import { Tooltip } from '@radix-ui/themes'
-import { ArrowsClockwiseIcon, CaretDownIcon, CaretUpIcon } from '@phosphor-icons/react'
+import { Component, Suspense, useRef, useEffect, type ReactNode } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { Physics } from '@react-three/rapier'
 import { SplatRenderer } from '../modules/splat/SplatRenderer'
@@ -23,8 +21,6 @@ import { DEFAULT_SHADOW_CATCHER_COLOR, DEFAULT_SHADOW_CATCHER_OPACITY, shadowCat
 import { getSplatUrl } from '../utils/worldLoader'
 import { useDebugStore } from '../store/debug'
 import { WorldRenderMode, ObjectRenderMode, ViewerQuality, type Vec3Tuple, type World, type WorldHoverPreview, type WorldObjectAsset, type WorldSceneProject } from '../types/world'
-import { AppButton } from './AppButton'
-import { chrome } from './AppChrome'
 
 type CharHandle = CharacterControllerHandle | FlyControllerHandle | WizardControllerHandle
 const DEFAULT_ENVIRONMENT_URL = '/hdri.jpg'
@@ -119,7 +115,6 @@ function DefaultEnvironment({ intensity }: { intensity: number }) {
 interface Props {
   world?: World
   slug: string
-  sourceImageUrl?: string
   hoveredWorldPreview?: WorldHoverPreview | null
   objectAssets: WorldObjectAsset[]
   allObjectAssets: WorldObjectAsset[]
@@ -132,15 +127,12 @@ interface Props {
   uiVisible?: boolean
   onObjectHover?: (asset: WorldObjectAsset, hovering: boolean, instanceId?: string) => void
   onSceneProjectSaved?: (project: WorldSceneProject) => void
-  onRefreshWorlds?: () => void
-  refreshingWorlds?: boolean
 }
 
 export function WorldViewer({
   world: desiredWorld,
   slug: desiredSlug,
-  sourceImageUrl,
-  hoveredWorldPreview,
+  hoveredWorldPreview: _hoveredWorldPreview,
   objectAssets: desiredObjectAssets,
   allObjectAssets,
   worldSfxUrls,
@@ -152,8 +144,6 @@ export function WorldViewer({
   uiVisible = true,
   onObjectHover,
   onSceneProjectSaved,
-  onRefreshWorlds,
-  refreshingWorlds = false,
 }: Props) {
   const charRef = useRef<CharHandle>(null)
   const worldRenderMode = useDebugStore((s) => s.worldRenderMode)
@@ -165,7 +155,6 @@ export function WorldViewer({
   const environmentIntensity = useDebugStore((s) => s.environmentIntensity)
   const sunIntensity = useDebugStore((s) => s.sunIntensity)
   const sunColor = useDebugStore((s) => s.sunColor)
-  const [sourceThumbnailCollapsed, setSourceThumbnailCollapsed] = useState(false)
   const colliderUrl = desiredWorld?.assets.mesh.collider_mesh_url.startsWith('/worlds/')
     ? desiredWorld.assets.mesh.collider_mesh_url
     : ''
@@ -184,6 +173,9 @@ export function WorldViewer({
   const splatUrl = desiredWorld ? getSplatUrl(desiredWorld) : ''
   const { ground_plane_offset, flip_y, metric_scale_factor } = desiredWorld?.assets.splats.semantics_metadata ?? DEFAULT_WORLD_SEMANTICS
   const flipY = flip_y ?? true
+  const splatFlipYOverride = useWizardTuning((s) => s.splatFlipYOverride)
+  // XOR: override flips ONLY the splat without affecting the collider (which keeps `flipY`).
+  const splatFlipY = flipY !== splatFlipYOverride
   const baseMetricScaleFactor = metric_scale_factor ?? 1
   const baseGroundPlaneOffset = ground_plane_offset ?? 0
   const isHighQuality = viewerQuality === ViewerQuality.High
@@ -230,6 +222,9 @@ export function WorldViewer({
   // `isWizardMode` derivation right after it's available.
   const wizardShadowColor = useWizardTuning((s) => s.colliderGlbShadowColor)
   const wizardShadowOpacity = useWizardTuning((s) => s.colliderGlbShadowOpacity)
+  const colliderOffsetX = useWizardTuning((s) => s.colliderOffsetX)
+  const colliderOffsetY = useWizardTuning((s) => s.colliderOffsetY)
+  const colliderOffsetZ = useWizardTuning((s) => s.colliderOffsetZ)
   const objectPlacements = sceneProject?.instances ?? placementEditor.instances
   const objectPhysicsAssets = sceneProject?.instances.length ? allObjectAssets : desiredObjectAssets
   const activeControllerMode = editing ? 'fly' : controllerMode
@@ -238,19 +233,6 @@ export function WorldViewer({
   const activeShadowCatcherColor = isWizardMode
     ? rgbTupleToHex(wizardShadowColor)
     : sceneShadowCatcherColorValue
-  const hoveredObjectAsset = hoveredObjectAssetId
-    ? allObjectAssets.find((asset) => asset.assetId === hoveredObjectAssetId)
-      ?? desiredObjectAssets.find((asset) => asset.assetId === hoveredObjectAssetId)
-    : undefined
-  const activePreviewImageUrl = hoveredObjectAsset?.referenceImageUrl
-    ?? hoveredObjectAsset?.thumbnailUrl
-    ?? hoveredWorldPreview?.imageUrl
-    ?? sourceImageUrl
-  const activePreviewAlt = hoveredObjectAsset
-    ? `${hoveredObjectAsset.name} reference image`
-    : hoveredWorldPreview?.imageUrl
-      ? hoveredWorldPreview.alt
-      : 'Original source'
   return (
     <>
       <Canvas
@@ -286,6 +268,9 @@ export function WorldViewer({
                     metricScaleFactor={activeMetricScaleFactor}
                     shadowOpacity={activeShadowCatcherOpacity}
                     shadowColor={activeShadowCatcherColor}
+                    offsetX={colliderOffsetX}
+                    offsetY={colliderOffsetY}
+                    offsetZ={colliderOffsetZ}
                     forceShadowCatcher={isWizardMode}
                   />
                 </Suspense>
@@ -314,7 +299,7 @@ export function WorldViewer({
                 url={splatUrl}
                 visible={showSplat}
                 groundPlaneOffset={activeGroundPlaneOffset}
-                flipY={flipY}
+                flipY={splatFlipY}
                 metricScaleFactor={activeMetricScaleFactor}
               />
             </OptionalAssetBoundary>
@@ -351,145 +336,7 @@ export function WorldViewer({
         </Suspense>
       </Canvas>
       {uiVisible && activeControllerMode === 'wizard' && <WizardGui />}
-      {uiVisible && (
-        <SourceImageControls
-          activeSourceImageUrl={activePreviewImageUrl}
-          previewAlt={activePreviewAlt}
-          thumbnailCollapsed={sourceThumbnailCollapsed}
-          refreshingWorlds={refreshingWorlds}
-          onRefreshWorlds={onRefreshWorlds}
-          onThumbnailCollapseToggle={() => setSourceThumbnailCollapsed((collapsed) => !collapsed)}
-        />
-      )}
       {editing && uiVisible && <PlacementEditorOverlay controller={placementEditor} />}
     </>
-  )
-}
-
-function SourceImageControls({
-  activeSourceImageUrl,
-  previewAlt,
-  thumbnailCollapsed,
-  refreshingWorlds,
-  onRefreshWorlds,
-  onThumbnailCollapseToggle,
-}: {
-  activeSourceImageUrl?: string
-  previewAlt: string
-  thumbnailCollapsed: boolean
-  refreshingWorlds: boolean
-  onRefreshWorlds?: () => void
-  onThumbnailCollapseToggle: () => void
-}) {
-  if (!activeSourceImageUrl && !import.meta.env.DEV) return null
-
-  return (
-    <div className={`pointer-events-none fixed bottom-2 right-2 z-30 hidden md:block ${chrome.enter}`}>
-      {activeSourceImageUrl ? (
-        thumbnailCollapsed ? (
-          <div className="flex items-center gap-1">
-            {import.meta.env.DEV && onRefreshWorlds && (
-              <RefreshWorldsButton
-                refreshing={refreshingWorlds}
-                onRefresh={onRefreshWorlds}
-                className="pointer-events-auto"
-              />
-            )}
-            <SourceThumbnailCollapseButton
-              collapsed={thumbnailCollapsed}
-              onToggle={onThumbnailCollapseToggle}
-              className="pointer-events-auto"
-            />
-          </div>
-        ) : (
-          <div className="relative overflow-hidden rounded-lg border border-white/15 bg-black/70 shadow-lg ring-1 ring-black/30 backdrop-blur-md">
-            <img
-              src={activeSourceImageUrl}
-              alt={previewAlt}
-              className="block h-96 aspect-square object-cover"
-              draggable={false}
-            />
-            <div className="absolute bottom-0.5 right-0.5 flex items-center gap-1">
-              {import.meta.env.DEV && onRefreshWorlds && (
-                <RefreshWorldsButton
-                  refreshing={refreshingWorlds}
-                  onRefresh={onRefreshWorlds}
-                  className="pointer-events-auto"
-                />
-              )}
-              <SourceThumbnailCollapseButton
-                collapsed={thumbnailCollapsed}
-                onToggle={onThumbnailCollapseToggle}
-                className="pointer-events-auto"
-              />
-            </div>
-          </div>
-        )
-      ) : (
-        import.meta.env.DEV && onRefreshWorlds && (
-          <RefreshWorldsButton
-            refreshing={refreshingWorlds}
-            onRefresh={onRefreshWorlds}
-            className="pointer-events-auto"
-          />
-        )
-      )}
-    </div>
-  )
-}
-
-function SourceThumbnailCollapseButton({
-  collapsed,
-  onToggle,
-  className = '',
-}: {
-  collapsed: boolean
-  onToggle: () => void
-  className?: string
-}) {
-  const Icon = collapsed ? CaretUpIcon : CaretDownIcon
-
-  return (
-    <Tooltip
-      content={collapsed ? 'show original source image' : 'collapse original source image'}
-      delayDuration={0}
-      side="top"
-    >
-      <AppButton
-        onClick={onToggle}
-        className={`h-6 w-6 justify-center rounded border border-white/15 bg-black/70 p-0 text-white opacity-70 shadow-lg backdrop-blur-md ${className}`}
-        aria-label={collapsed ? 'Show original source image' : 'Collapse original source image'}
-        aria-pressed={collapsed}
-      >
-        <Icon size={15} weight="bold" />
-      </AppButton>
-    </Tooltip>
-  )
-}
-
-function RefreshWorldsButton({
-  refreshing,
-  onRefresh,
-  className = '',
-}: {
-  refreshing: boolean
-  onRefresh: () => void
-  className?: string
-}) {
-  return (
-    <Tooltip
-      content={refreshing ? 'refreshing local assets' : 'refresh local assets'}
-      delayDuration={0}
-      side="top"
-    >
-      <AppButton
-        onClick={onRefresh}
-        active={refreshing}
-        className={`h-6 w-6 justify-center rounded border border-white/15 bg-black/70 p-0 text-white shadow-lg backdrop-blur-md ${className}`}
-        aria-label="Refresh local assets"
-      >
-        <ArrowsClockwiseIcon size={12} weight={refreshing ? 'bold' : 'regular'} />
-      </AppButton>
-    </Tooltip>
   )
 }

@@ -24,6 +24,7 @@ import {
   type ShadowMapType,
   type WizardTuning,
 } from './wizardTuning'
+import { useDebugStore } from '../../store/debug'
 
 const SHADOW_MAP_TYPES: ShadowMapType[] = [
   'BasicShadowMap',
@@ -119,6 +120,7 @@ export function WizardGui() {
     const splatFolder = gui.addFolder('Background splat (Spark)')
     tracked.push(
       splatFolder.add(tAny, 'splatUniformScale', 0.05, 8, 0.01).name('Uniform scale').onChange(push('splatUniformScale')),
+      splatFolder.add(tAny, 'splatFlipYOverride').name('Flip Y (splat only)').onChange(push('splatFlipYOverride')),
     )
 
     // ── Spark renderer ───────────────────────────────────────────────────────
@@ -126,6 +128,17 @@ export function WizardGui() {
     tracked.push(
       sparkRendererFolder.add(tAny, 'sparkFocalDistance', 0, 120, 0.05).name('Focal distance (Ln)').onChange(push('sparkFocalDistance')),
       sparkRendererFolder.add(tAny, 'sparkApertureAngleDeg', 0, 45, 0.05).name('Aperture angle (°)').onChange(push('sparkApertureAngleDeg')),
+    )
+
+    // ── Splat performance (LOD) ──────────────────────────────────────────────
+    // Drag these LEFT for more FPS on heavy splats (200MB+). Spark picks a
+    // subset of splats from the file's baked LOD tree at runtime.
+    const splatPerfFolder = gui.addFolder('Splat performance')
+    tracked.push(
+      splatPerfFolder.add(tAny, 'splatLodEnabled').name('LOD enabled').onChange(push('splatLodEnabled')),
+      splatPerfFolder.add(tAny, 'splatLodSplatScale', 0.05, 2, 0.01).name('LOD splat scale').onChange(push('splatLodSplatScale')),
+      splatPerfFolder.add(tAny, 'splatLodRenderScale', 1, 5, 0.1).name('LOD render scale (px)').onChange(push('splatLodRenderScale')),
+      splatPerfFolder.add(tAny, 'splatMaxStdDev', Math.sqrt(4), Math.sqrt(9), 0.01).name('Max std dev').onChange(push('splatMaxStdDev')),
     )
 
     // ── Character model ──────────────────────────────────────────────────────
@@ -145,7 +158,7 @@ export function WizardGui() {
     const dogOffsetFolder = dogFolder.addFolder('Position offset (rig space)')
     tracked.push(
       dogOffsetFolder.add(tAny, 'dogOffsetX', -5, 2, 0.01).name('X').onChange(push('dogOffsetX')),
-      dogOffsetFolder.add(tAny, 'dogOffsetY', -5, 6, 0.01).name('Y (up)').onChange(push('dogOffsetY')),
+      dogOffsetFolder.add(tAny, 'dogOffsetY', -15, 6, 0.01).name('Y (up)').onChange(push('dogOffsetY')),
       dogOffsetFolder.add(tAny, 'dogOffsetZ', -5, 2, 0.01).name('Z').onChange(push('dogOffsetZ')),
     )
 
@@ -154,6 +167,92 @@ export function WizardGui() {
     tracked.push(
       spawnFolder.add(tAny, 'spawnFeetY', 0, 50, 0.1).name('Feet Y').onChange(push('spawnFeetY')),
     )
+    // Respawn re-keys the <Physics> tree, which forces the character RigidBody to
+    // re-mount at the current spawnFeetY. Use after swapping in a new world / collider
+    // GLB to unstick a character spawned inside geometry.
+    spawnFolder.add({
+      respawn: () => useDebugStore.getState().resetObjects(),
+    }, 'respawn').name('Respawn')
+
+    // ── Splat position + rotation offset (image-blaster addition) ───────────
+    // Adjusts the visible SPZ relative to the world manifest's transform.
+    // For aligning a splat to a collider GLB that was authored in a different
+    // reference frame. The 3D gizmo toggle mounts a draggable handle in the scene
+    // — clicking handles also writes back into these sliders.
+    const splatOffsetFolder = gui.addFolder('Splat position + rotation')
+    const splatOffsetTracked = [
+      splatOffsetFolder.add(tAny, 'splatOffsetX', -50, 50, 0.05).name('Pos X').onChange(push('splatOffsetX')),
+      splatOffsetFolder.add(tAny, 'splatOffsetY', -50, 50, 0.05).name('Pos Y').onChange(push('splatOffsetY')),
+      splatOffsetFolder.add(tAny, 'splatOffsetZ', -50, 50, 0.05).name('Pos Z').onChange(push('splatOffsetZ')),
+      splatOffsetFolder.add(tAny, 'splatRotationDegX', -180, 180, 0.5).name('Rot X (°)').onChange(push('splatRotationDegX')),
+      splatOffsetFolder.add(tAny, 'splatRotationDegY', -180, 180, 0.5).name('Rot Y (°)').onChange(push('splatRotationDegY')),
+      splatOffsetFolder.add(tAny, 'splatRotationDegZ', -180, 180, 0.5).name('Rot Z (°)').onChange(push('splatRotationDegZ')),
+    ]
+    tracked.push(...splatOffsetTracked)
+    const refreshSplatOffsetDisplay = () => splatOffsetTracked.forEach((c) => c.updateDisplay())
+    // Re-sync the slider readouts when the in-scene gizmo updates the store.
+    const unsubSplatTuning = useWizardTuning.subscribe((s, prev) => {
+      if (
+        s.splatOffsetX !== prev.splatOffsetX ||
+        s.splatOffsetY !== prev.splatOffsetY ||
+        s.splatOffsetZ !== prev.splatOffsetZ ||
+        s.splatRotationDegX !== prev.splatRotationDegX ||
+        s.splatRotationDegY !== prev.splatRotationDegY ||
+        s.splatRotationDegZ !== prev.splatRotationDegZ
+      ) {
+        tAny.splatOffsetX = s.splatOffsetX
+        tAny.splatOffsetY = s.splatOffsetY
+        tAny.splatOffsetZ = s.splatOffsetZ
+        tAny.splatRotationDegX = s.splatRotationDegX
+        tAny.splatRotationDegY = s.splatRotationDegY
+        tAny.splatRotationDegZ = s.splatRotationDegZ
+        refreshSplatOffsetDisplay()
+      }
+    })
+    tracked.push(
+      splatOffsetFolder.add(tAny, 'splatGizmoEnabled').name('3D gizmo (visual)').onChange(push('splatGizmoEnabled')),
+      splatOffsetFolder.add(tAny, 'splatGizmoMode', ['translate', 'rotate', 'scale']).name('Gizmo mode').onChange(push('splatGizmoMode')),
+    )
+    splatOffsetFolder.add({
+      reset: () => {
+        const zeros = {
+          splatOffsetX: 0,
+          splatOffsetY: 0,
+          splatOffsetZ: 0,
+          splatRotationDegX: 0,
+          splatRotationDegY: 0,
+          splatRotationDegZ: 0,
+        }
+        Object.assign(tAny, zeros)
+        useWizardTuning.getState().setTuning(zeros)
+        refreshSplatOffsetDisplay()
+      },
+    }, 'reset').name('Reset splat transform')
+
+    // ── Collider position offset (image-blaster addition) ───────────────────
+    // Live-translates the collider GLB via Rapier setTranslation so a misaligned
+    // export from Blender can be nudged into the splat without re-exporting.
+    const colliderOffsetFolder = gui.addFolder('Collider position offset')
+    const refreshOffsetDisplay = () => colliderOffsetTracked.forEach((c) => c.updateDisplay())
+    const colliderOffsetTracked = [
+      colliderOffsetFolder.add(tAny, 'colliderOffsetX', -50, 50, 0.05).name('X').onChange(push('colliderOffsetX')),
+      colliderOffsetFolder.add(tAny, 'colliderOffsetY', -50, 50, 0.05).name('Y (up)').onChange(push('colliderOffsetY')),
+      colliderOffsetFolder.add(tAny, 'colliderOffsetZ', -50, 50, 0.05).name('Z').onChange(push('colliderOffsetZ')),
+    ]
+    tracked.push(...colliderOffsetTracked)
+    colliderOffsetFolder.add({
+      reset: () => {
+        tAny.colliderOffsetX = 0
+        tAny.colliderOffsetY = 0
+        tAny.colliderOffsetZ = 0
+        useWizardTuning.getState().setTuning({
+          colliderOffsetX: 0,
+          colliderOffsetY: 0,
+          colliderOffsetZ: 0,
+        })
+        refreshOffsetDisplay()
+      },
+    }, 'reset').name('Reset to 0,0,0')
 
     // ── Physics debug (Rapier) ───────────────────────────────────────────────
     const dbgFolder = gui.addFolder('Physics debug (Rapier)')
@@ -207,6 +306,7 @@ export function WizardGui() {
 
     // Default-folder collapse state mirrors the astronaut demo (everything open).
     return () => {
+      unsubSplatTuning()
       gui.destroy()
       guiRef.current = null
       // Suppress unused-tracked warning; refs kept to allow future updateDisplay() reset.

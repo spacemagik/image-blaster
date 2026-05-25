@@ -20,18 +20,14 @@ const DebugPanel = import.meta.env.DEV
 
 export function App() {
   const [worlds, setWorlds] = useState(loadWorlds)
-  const [refreshingWorlds, setRefreshingWorlds] = useState(false)
   const refreshTimeoutRef = useRef<number | undefined>(undefined)
 
   const refreshWorlds = useCallback(async () => {
     if (!import.meta.env.DEV) return
-    setRefreshingWorlds(true)
     try {
       setWorlds(await fetchWorlds())
     } catch (error) {
       console.warn('Could not refresh local world assets.', error)
-    } finally {
-      setRefreshingWorlds(false)
     }
   }, [])
 
@@ -65,23 +61,11 @@ export function App() {
   }
 
   return (
-    <LoadedApp
-      worlds={worlds}
-      refreshingWorlds={refreshingWorlds}
-      onRefreshWorlds={refreshWorlds}
-    />
+    <LoadedApp worlds={worlds} />
   )
 }
 
-function LoadedApp({
-  worlds,
-  refreshingWorlds,
-  onRefreshWorlds,
-}: {
-  worlds: WorldEntry[]
-  refreshingWorlds: boolean
-  onRefreshWorlds: () => void
-}) {
+function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
   const [editMatch, editParams] = useRoute('/:slug/edit')
   const [match, params] = useRoute('/:slug')
   const levaCollapsed = useDebugStore((s) => s.levaCollapsed)
@@ -168,7 +152,6 @@ function LoadedApp({
       <WorldViewer
         world={activeWorld}
         slug={entry.slug}
-        sourceImageUrl={entry.sourceImageUrl}
         hoveredWorldPreview={hoveredWorldPreview}
         objectAssets={renderableObjectAssets}
         allObjectAssets={renderableAllObjectAssets}
@@ -181,8 +164,6 @@ function LoadedApp({
         uiVisible={uiVisible}
         onObjectHover={handleObjectHover}
         onSceneProjectSaved={updateSceneProject}
-        onRefreshWorlds={onRefreshWorlds}
-        refreshingWorlds={refreshingWorlds}
       />
       {!editing && uiVisible && emptyWorld && (
         <div className="pointer-events-none fixed inset-0 z-10 flex items-center justify-center px-6 gap-2">

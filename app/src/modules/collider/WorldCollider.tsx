@@ -1,5 +1,5 @@
-import { useMemo, useEffect } from 'react'
-import { RigidBody } from '@react-three/rapier'
+import { useMemo, useEffect, useRef } from 'react'
+import { RigidBody, type RapierRigidBody } from '@react-three/rapier'
 import { useGLTF } from '@react-three/drei'
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import * as THREE from 'three'
@@ -16,6 +16,10 @@ interface Props {
   metricScaleFactor?: number
   shadowOpacity?: number
   shadowColor?: string
+  /** Runtime nudge for misaligned collider GLBs — applied as a translation only, no BVH rebuild. */
+  offsetX?: number
+  offsetY?: number
+  offsetZ?: number
   /**
    * Always mount an invisible ShadowMaterial clone of the collider in parallel with
    * whatever visible render mode is active. Used by Wizard mode so the floor catches
@@ -27,15 +31,40 @@ interface Props {
 
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
-export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor, forceShadowCatcher }: Props) {
+export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor, offsetX, offsetY, offsetZ, forceShadowCatcher }: Props) {
   const { scene: rawScene } = useGLTF(url)
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const worldRenderMode = useDebugStore((s) => s.worldRenderMode)
   const { wireframeMaterial, shadedMaterial, wireframeOverlayMaterial } = useAssetMaterials()
   const normalizedGroundPlaneOffset = groundPlaneOffset ?? 0
   const normalizedMetricScaleFactor = metricScaleFactor ?? 1
+  const normalizedOffsetX = offsetX ?? 0
+  const normalizedOffsetY = offsetY ?? 0
+  const normalizedOffsetZ = offsetZ ?? 0
   const normalizedRotation = flipY ? Math.PI : 0
+  // Translation deliberately omitted from the key — we update it via setTranslation
+  // (cheap) instead of remounting the RigidBody (rebuilds the trimesh BVH, ~seconds
+  // for a 2M-vertex collider).
   const colliderTransformKey = `${url}:${normalizedRotation}:${normalizedGroundPlaneOffset}:${normalizedMetricScaleFactor}`
+  const bodyRef = useRef<RapierRigidBody | null>(null)
+  const initialBodyPosition: [number, number, number] = [
+    normalizedOffsetX,
+    normalizedGroundPlaneOffset + normalizedOffsetY,
+    normalizedOffsetZ,
+  ]
+  const visualPosition: [number, number, number] = initialBodyPosition
+
+  // Live-update the fixed body's translation when the GUI offset sliders change.
+  // setTranslation reuses the existing collider/BVH so trimesh stays mounted.
+  useEffect(() => {
+    const body = bodyRef.current
+    if (!body) return
+    body.setTranslation({
+      x: normalizedOffsetX,
+      y: normalizedGroundPlaneOffset + normalizedOffsetY,
+      z: normalizedOffsetZ,
+    }, true)
+  }, [normalizedOffsetX, normalizedOffsetY, normalizedOffsetZ, normalizedGroundPlaneOffset, colliderTransformKey])
 
   // Own shadow material instance — not shared, so shader compiles correctly per-mesh
   const shadowMat = useMemo(() => new THREE.ShadowMaterial({
@@ -112,10 +141,11 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
     <>
       <RigidBody
         key={colliderTransformKey}
+        ref={bodyRef}
         type="fixed"
         colliders="trimesh"
         rotation={[normalizedRotation, 0, 0]}
-        position={[0, normalizedGroundPlaneOffset, 0]}
+        position={initialBodyPosition}
         scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
       >
         <primitive object={scene} />
@@ -126,14 +156,14 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
       <primitive
         object={dropTargetScene}
         rotation={[normalizedRotation, 0, 0]}
-        position={[0, normalizedGroundPlaneOffset, 0]}
+        position={visualPosition}
         scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
       />
       {forceShadowCatcher && (
         <primitive
           object={shadowCatcherScene}
           rotation={[normalizedRotation, 0, 0]}
-          position={[0, normalizedGroundPlaneOffset, 0]}
+          position={visualPosition}
           scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
         />
       )}

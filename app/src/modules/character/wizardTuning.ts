@@ -53,8 +53,24 @@ export interface WizardTuning {
 
   // Splat / Spark
   splatUniformScale: number
+  /**
+   * Per-splat 180° X-axis flip override. XOR'd with the world manifest's
+   * `flip_y` so you can flip JUST the splat without also flipping the collider
+   * (which the manifest's `flip_y` would do — same rotation prop goes to both).
+   * Useful when a splat and collider were authored in different Y conventions.
+   */
+  splatFlipYOverride: boolean
   sparkFocalDistance: number
   sparkApertureAngleDeg: number
+
+  // Splat LOD performance (Spark 2.0)
+  // Spark embeds an LOD tree in each SPZ; these knobs let us trade quality for FPS
+  // without re-encoding the file. Most useful when a single SPZ is very large
+  // (e.g., 200MB+ from World Labs) — the renderer can pick a subset of splats.
+  splatLodEnabled: boolean
+  splatLodSplatScale: number   // 0.1..2.0 (×1.0 = Spark's platform default ~2.5M desktop)
+  splatLodRenderScale: number  // 1.0..5.0 px (higher = fewer tiny splats kept)
+  splatMaxStdDev: number       // sqrt(4)..sqrt(9) — Gaussian extent, lower = faster
 
   // Lighting
   ambientIntensity: number
@@ -99,6 +115,32 @@ export interface WizardTuning {
   // tune this per world or the character can spawn above the ceiling or below the floor.
   spawnFeetY: number
 
+  // Collider GLB position offset (image-blaster addition).
+  // Lets the user nudge a misaligned collider mesh into place at runtime instead of
+  // re-exporting from Blender. Applied on top of the world manifest's
+  // `ground_plane_offset` (so Y here is additive). Translation only — no rebuild of the
+  // trimesh BVH (we call `setTranslation` on the RigidBody directly).
+  colliderOffsetX: number
+  colliderOffsetY: number
+  colliderOffsetZ: number
+
+  // Splat (SPZ) position + rotation offset (image-blaster addition).
+  // Mirrors the collider offset but applies to the visible Gaussian splat. Useful when
+  // the SPZ was exported in a slightly different reference frame than the collider GLB
+  // (e.g. user repositioned the splat in Blender / World Labs but not the matching
+  // mesh, or vice-versa). Rotation values stored as degrees so the GUI sliders make
+  // intuitive sense; converted to radians at apply time.
+  splatOffsetX: number
+  splatOffsetY: number
+  splatOffsetZ: number
+  splatRotationDegX: number
+  splatRotationDegY: number
+  splatRotationDegZ: number
+  // In-canvas 3D gizmo for dragging the splat directly. Off by default because
+  // TransformControls intercepts clicks on the canvas; users normally don't want
+  // that handle hovering over their world.
+  splatGizmoEnabled: boolean
+  splatGizmoMode: 'translate' | 'rotate' | 'scale'
 
   // Scene-object placements (astronaut demo had Flag 2 + Rocket)
   flag2X: number
@@ -121,7 +163,7 @@ export interface WizardTuningStore extends WizardTuning {
 }
 
 export const DEFAULT_WIZARD_TUNING: WizardTuning = {
-  moveSpeed: 5,
+  moveSpeed: 9.5,
   sprintMoveMultiplier: 1.85,
   sprintWalkAnimMultiplier: 1.4,
   jumpSpeed: 12,
@@ -138,7 +180,7 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   // slide the Mesh yaw (°) GUI control by ±180.
   dogYawDeg: 0,
   dogOffsetX: 0,
-  dogOffsetY: -3.86,
+  dogOffsetY: -3.69,
   dogOffsetZ: 0,
   dogTurnSpeed: 6,
   dogWalkSpeedThreshold: 0.08,
@@ -151,8 +193,16 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   debugBodies: true,
 
   splatUniformScale: 1.22,
+  // Per-splat extra 180° X flip — leave false by default; flip via GUI only when
+  // a specific world's splat is upside-down relative to its collider.
+  splatFlipYOverride: false,
   sparkFocalDistance: 0,
   sparkApertureAngleDeg: 0,
+
+  splatLodEnabled: true,
+  splatLodSplatScale: 0.5,
+  splatLodRenderScale: 1.5,
+  splatMaxStdDev: Math.sqrt(6),
 
   ambientIntensity: 0.83,
   sunIntensity: 1.62,
@@ -191,6 +241,19 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
 
   spawnFeetY: 4,
 
+  colliderOffsetX: 0,
+  colliderOffsetY: -7.599,
+  colliderOffsetZ: 0,
+
+  splatOffsetX: 4.07184,
+  splatOffsetY: 0.495,
+  splatOffsetZ: 5.90625,
+  splatRotationDegX: 0,
+  splatRotationDegY: 0,
+  splatRotationDegZ: 0,
+  splatGizmoEnabled: false,
+  splatGizmoMode: 'translate',
+
   flag2X: -9.4,
   flag2Y: 2.6,
   flag2Z: 3.3,
@@ -215,7 +278,10 @@ export const useWizardTuning = create<WizardTuningStore>()(
     {
       name: 'image-blaster-wizard-tuning',
       // Bumped on schema change to drop stale persisted values from earlier prototypes.
-      version: 13,
+      // Note: ADDING a new field with a sane default does NOT require bumping — zustand
+      // persist's default shallow merge keeps the new default for missing keys. Only bump
+      // when removing or renaming a field, or when defaults change meaningfully.
+      version: 16,
       partialize: (s) => {
         const {
           resetToken: _resetToken,

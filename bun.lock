@@ -13,7 +13,7 @@
         "@react-three/fiber": "^9.6.0",
         "@react-three/postprocessing": "^3.0.4",
         "@react-three/rapier": "^2.2.0",
-        "@sparkjsdev/spark": "^2.0.0",
+        "@sparkjsdev/spark": "^2.1.0",
         "leva": "^0.10.1",
         "lil-gui": "^0.20.0",
         "postprocessing": "^6.36.0",
@@ -346,7 +346,7 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.60.3", "", { "os": "win32", "cpu": "x64" }, "sha512-hPt/bgL5cE+Qp+/TPHBqptcAgPzgj46mPcg/16zNUmbQk0j+mOEQV/+Lqu8QRtDV3Ek95Q6FeFITpuhl6OTsAA=="],
 
-    "@sparkjsdev/spark": ["@sparkjsdev/spark@2.0.0", "", { "dependencies": { "fflate": "^0.8.2" }, "peerDependencies": { "three": "^0.180.0" } }, "sha512-W1p7NM4xXcUAVVcVus2mIFwcAC3VckyE0l4wXJuSmhcOgb6hHpqhQ/Ks9MK9ts7j23K+UwbCBwe+aTc/zgGygw=="],
+    "@sparkjsdev/spark": ["@sparkjsdev/spark@2.1.0", "", { "dependencies": { "fflate": "^0.8.2" }, "peerDependencies": { "three": ">=0.180.0" } }, "sha512-BRw+MuMzx0B3K8fDLQygt2OHEhYUV+41RX7btq9pZ3rCVrq42o57jW34VAIvC7JO/84DJh/1AutACV9ym6BfVg=="],
 
     "@stitches/react": ["@stitches/react@1.2.8", "", { "peerDependencies": { "react": ">= 16.3.0" } }, "sha512-9g9dWI4gsSVe8bNLlb+lMkBYsnIKCZTmvqvDG+Avnn69XfmHZKiaMrx7cgTaddq7aTPPmXiTsbFcUy0xgI4+wA=="],
 
