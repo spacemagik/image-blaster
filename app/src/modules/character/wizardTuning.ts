@@ -71,6 +71,20 @@ export interface WizardTuning {
   splatLodSplatScale: number   // 0.1..2.0 (×1.0 = Spark's platform default ~2.5M desktop)
   splatLodRenderScale: number  // 1.0..5.0 px (higher = fewer tiny splats kept)
   splatMaxStdDev: number       // sqrt(4)..sqrt(9) — Gaussian extent, lower = faster
+  // Spark 2.1 additions for big SPZs.
+  // splatLodSplatCount overrides Spark's platform default budget directly: it caps
+  // active splats at this absolute number, which is more predictable than the relative
+  // `lodSplatScale`. Set to 0 to fall back to Spark's per-platform default.
+  splatLodSplatCount: number   // 0 = auto; otherwise an absolute cap (e.g. 1_500_000)
+  splatMinPixelRadius: number  // splats projected smaller than this are discarded (px)
+  // Fixed foveation cones — full-res inside `coneFov0`, smoothly degrade out to `coneFov`,
+  // then to behind the viewer. Aggressive foveation is the single biggest win on giant
+  // SPZs because off-screen and peripheral splats are still loaded otherwise.
+  splatConeFov0Deg: number     // 0..180 (default 90)
+  splatConeFovDeg: number      // 0..180 (default 120, must be >= splatConeFov0Deg)
+  splatConeFoveate: number     // 0..1   (default 0.4, lower = fewer peripheral splats)
+  splatBehindFoveate: number   // 0..1   (default 0.2, lower = fewer behind-camera splats)
+  splatLodInflate: boolean     // softer kernels; can hide LoD popping at low budgets
 
   // Lighting
   ambientIntensity: number
@@ -155,9 +169,62 @@ export interface WizardTuning {
   rocketScale: number
 }
 
+export type SplatPerfPreset = 'performance' | 'balanced' | 'quality'
+
+/**
+ * Splat-rendering preset table — one click sets every Spark 2.1 LoD knob at once.
+ * Tuned for ~20M-splat scenes on a laptop integrated GPU; bigger desktop GPUs can
+ * crank `quality` higher freely.
+ */
+export const SPLAT_PERF_PRESETS: Record<SplatPerfPreset, Partial<WizardTuning>> = {
+  // Lock in 60fps even with 20M-splat scenes. Aggressive foveation + tight budget.
+  performance: {
+    splatLodEnabled: true,
+    splatLodSplatScale: 1,
+    splatLodSplatCount: 750_000,
+    splatLodRenderScale: 3,
+    splatMinPixelRadius: 1.25,
+    splatMaxStdDev: Math.sqrt(5),
+    splatConeFov0Deg: 45,
+    splatConeFovDeg: 90,
+    splatConeFoveate: 0.25,
+    splatBehindFoveate: 0.05,
+    splatLodInflate: true,
+  },
+  // A reasonable default for an integrated GPU on a 20M-splat scene.
+  balanced: {
+    splatLodEnabled: true,
+    splatLodSplatScale: 1,
+    splatLodSplatCount: 1_500_000,
+    splatLodRenderScale: 2,
+    splatMinPixelRadius: 0.75,
+    splatMaxStdDev: Math.sqrt(6),
+    splatConeFov0Deg: 60,
+    splatConeFovDeg: 110,
+    splatConeFoveate: 0.35,
+    splatBehindFoveate: 0.08,
+    splatLodInflate: false,
+  },
+  // Push detail; expect <60fps on heavy splats / weaker GPUs.
+  quality: {
+    splatLodEnabled: true,
+    splatLodSplatScale: 1,
+    splatLodSplatCount: 3_000_000,
+    splatLodRenderScale: 1.5,
+    splatMinPixelRadius: 0.5,
+    splatMaxStdDev: Math.sqrt(7),
+    splatConeFov0Deg: 90,
+    splatConeFovDeg: 130,
+    splatConeFoveate: 0.5,
+    splatBehindFoveate: 0.15,
+    splatLodInflate: false,
+  },
+}
+
 export interface WizardTuningStore extends WizardTuning {
   setTuning: (partial: Partial<WizardTuning>) => void
   resetTuning: () => void
+  applySplatPerfPreset: (preset: SplatPerfPreset) => void
   resetToken: number
   bumpResetToken: () => void
 }
@@ -200,9 +267,16 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   sparkApertureAngleDeg: 0,
 
   splatLodEnabled: true,
-  splatLodSplatScale: 0.5,
-  splatLodRenderScale: 1.5,
+  splatLodSplatScale: 1,
+  splatLodRenderScale: 2,
   splatMaxStdDev: Math.sqrt(6),
+  splatLodSplatCount: 1_500_000,
+  splatMinPixelRadius: 0.75,
+  splatConeFov0Deg: 60,
+  splatConeFovDeg: 110,
+  splatConeFoveate: 0.35,
+  splatBehindFoveate: 0.08,
+  splatLodInflate: false,
 
   ambientIntensity: 0.83,
   sunIntensity: 1.62,
@@ -273,6 +347,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       resetToken: 0,
       setTuning: (partial) => set(partial),
       resetTuning: () => set({ ...DEFAULT_WIZARD_TUNING }),
+      applySplatPerfPreset: (preset) => set(SPLAT_PERF_PRESETS[preset]),
       bumpResetToken: () => set((s) => ({ resetToken: s.resetToken + 1 })),
     }),
     {
@@ -281,12 +356,18 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // Note: ADDING a new field with a sane default does NOT require bumping — zustand
       // persist's default shallow merge keeps the new default for missing keys. Only bump
       // when removing or renaming a field, or when defaults change meaningfully.
-      version: 16,
+      // v17: hard-reset to baked-in fantasy2 alignment values (moveSpeed=9.5,
+      // collider/splat offsets dialed in by hand). Persisted values from earlier
+      // tuning sessions would otherwise mask the new defaults.
+      // v18: Spark 2.1 LoD upgrade — new defaults for foveation + splat budget;
+      // bump so the upgraded defaults apply on next page load.
+      version: 18,
       partialize: (s) => {
         const {
           resetToken: _resetToken,
           setTuning: _set,
           resetTuning: _reset,
+          applySplatPerfPreset: _preset,
           bumpResetToken: _bump,
           ...rest
         } = s

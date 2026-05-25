@@ -99,31 +99,61 @@ export function SplatRenderer({
       }
     }, [])
 
+    // Per-frame setter cache — Spark's setters can trigger LoD/sort dirtying. We only
+    // write when the value actually changed so panning the camera doesn't keep marking
+    // the LoD pager dirty on every frame.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lastApplied = useRef<Record<string, any>>({})
+
     useFrame(() => {
       const spark = sparkRef.current
       if (!spark) return
       const s = useDebugStore.getState()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const u = spark.material.uniforms as any
-      if (s.viewerQuality === ViewerQuality.High && s.dofEnabled) {
-        spark.focalDistance = s.focalDistance
-        spark.apertureAngle = s.apertureAngle
-        spark.falloff = s.falloff
-        if (u.sharpRange) u.sharpRange.value = Number.isFinite(s.sharpRange) ? s.sharpRange : DEFAULT_SHARP_RANGE
-        if (u.falloffRate) u.falloffRate.value = s.falloffRate > 0 ? s.falloffRate : DEFAULT_FALLOFF_RATE
-      } else {
-        spark.focalDistance = 0
-        spark.apertureAngle = 0
-        spark.falloff = 1
+      const cache = lastApplied.current
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const setIfChanged = (key: string, value: any, apply: (v: any) => void) => {
+        if (cache[key] !== value) { cache[key] = value; apply(value) }
       }
 
-      // Live splat-performance knobs (Spark 2.0 LOD).
+      const dofOn = s.viewerQuality === ViewerQuality.High && s.dofEnabled
+      const focal = dofOn ? s.focalDistance : 0
+      const aperture = dofOn ? s.apertureAngle : 0
+      const falloff = dofOn ? s.falloff : 1
+      setIfChanged('focalDistance', focal, (v) => { spark.focalDistance = v })
+      setIfChanged('apertureAngle', aperture, (v) => { spark.apertureAngle = v })
+      setIfChanged('falloff', falloff, (v) => { spark.falloff = v })
+      if (u.sharpRange) {
+        const v = dofOn && Number.isFinite(s.sharpRange) ? s.sharpRange : DEFAULT_SHARP_RANGE
+        setIfChanged('sharpRange', v, (val) => { u.sharpRange.value = val })
+      }
+      if (u.falloffRate) {
+        const v = dofOn && s.falloffRate > 0 ? s.falloffRate : DEFAULT_FALLOFF_RATE
+        setIfChanged('falloffRate', v, (val) => { u.falloffRate.value = val })
+      }
+
+      // Live splat-performance knobs (Spark 2.1 LOD).
       const t = useWizardTuning.getState()
-      spark.enableLod = t.splatLodEnabled
-      spark.lodSplatScale = t.splatLodSplatScale
-      spark.lodRenderScale = t.splatLodRenderScale
-      if (u.maxStdDev) u.maxStdDev.value = t.splatMaxStdDev
-      spark.maxStdDev = t.splatMaxStdDev
+      setIfChanged('enableLod', t.splatLodEnabled, (v) => { spark.enableLod = v })
+      setIfChanged('lodSplatScale', t.splatLodSplatScale, (v) => { spark.lodSplatScale = v })
+      setIfChanged('lodRenderScale', t.splatLodRenderScale, (v) => { spark.lodRenderScale = v })
+      setIfChanged('lodSplatCount', t.splatLodSplatCount, (v) => {
+        // 0 / falsy = use Spark's per-platform default
+        spark.lodSplatCount = v > 0 ? v : undefined
+      })
+      setIfChanged('lodInflate', t.splatLodInflate, (v) => { spark.lodInflate = v })
+      setIfChanged('minPixelRadius', t.splatMinPixelRadius, (v) => { spark.minPixelRadius = v })
+      // Fixed foveation — the biggest win on huge SPZs because Spark drops detail
+      // in the peripheral cone (coneFov0…coneFov) and behind the viewer.
+      setIfChanged('coneFov0', t.splatConeFov0Deg, (v) => { spark.coneFov0 = v })
+      setIfChanged('coneFov', t.splatConeFovDeg, (v) => { spark.coneFov = v })
+      setIfChanged('coneFoveate', t.splatConeFoveate, (v) => { spark.coneFoveate = v })
+      setIfChanged('behindFoveate', t.splatBehindFoveate, (v) => { spark.behindFoveate = v })
+      setIfChanged('maxStdDev', t.splatMaxStdDev, (v) => {
+        spark.maxStdDev = v
+        if (u.maxStdDev) u.maxStdDev.value = v
+      })
     })
 
     useEffect(() => {
@@ -135,7 +165,22 @@ export function SplatRenderer({
       if (sparkRef.current) sparkRef.current.encodeLinear = encodeLinear
     }, [encodeLinear])
 
-    const sparkArgs = useMemo(() => ({ renderer, enableLod: true, encodeLinear: initialEncodeLinear.current }), [renderer])
+    // maxPagedSplats sizes Spark's paged GPU pool. Default desktop = 16M which is huge
+    // for our 1-3M working set. Pool size must be a multiple of the 65,536 page size.
+    // We grab the current LoD budget once (constructor-only knob) and pad ×3 for paging
+    // headroom; floor 4M so small budgets don't starve the pager.
+    const initialMaxPagedSplats = useRef<number>(
+      Math.max(
+        4_194_304,
+        Math.ceil((useWizardTuning.getState().splatLodSplatCount || 2_500_000) * 3 / 65_536) * 65_536,
+      ),
+    )
+    const sparkArgs = useMemo(() => ({
+      renderer,
+      enableLod: true,
+      encodeLinear: initialEncodeLinear.current,
+      maxPagedSplats: initialMaxPagedSplats.current,
+    }), [renderer])
     const splatArgs = useMemo(
       () => ({
         url,

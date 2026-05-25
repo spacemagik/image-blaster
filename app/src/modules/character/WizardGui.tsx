@@ -20,8 +20,10 @@ import { useEffect, useRef } from 'react'
 import GUI from 'lil-gui'
 import {
   DEFAULT_WIZARD_TUNING,
+  SPLAT_PERF_PRESETS,
   useWizardTuning,
   type ShadowMapType,
+  type SplatPerfPreset,
   type WizardTuning,
 } from './wizardTuning'
 import { useDebugStore } from '../../store/debug'
@@ -130,16 +132,79 @@ export function WizardGui() {
       sparkRendererFolder.add(tAny, 'sparkApertureAngleDeg', 0, 45, 0.05).name('Aperture angle (°)').onChange(push('sparkApertureAngleDeg')),
     )
 
-    // ── Splat performance (LOD) ──────────────────────────────────────────────
-    // Drag these LEFT for more FPS on heavy splats (200MB+). Spark picks a
-    // subset of splats from the file's baked LOD tree at runtime.
+    // ── Splat performance (Spark 2.1 LoD) ───────────────────────────────────
+    // Drag these LEFT for more FPS on heavy splats (20M+). Spark streams a working
+    // set out of the file's baked LOD tree at runtime — these knobs decide how big
+    // that set is and how aggressively peripheral splats get culled.
     const splatPerfFolder = gui.addFolder('Splat performance')
-    tracked.push(
+    // Live sliders that the preset buttons also have to refresh.
+    const splatPerfControls = [
       splatPerfFolder.add(tAny, 'splatLodEnabled').name('LOD enabled').onChange(push('splatLodEnabled')),
-      splatPerfFolder.add(tAny, 'splatLodSplatScale', 0.05, 2, 0.01).name('LOD splat scale').onChange(push('splatLodSplatScale')),
-      splatPerfFolder.add(tAny, 'splatLodRenderScale', 1, 5, 0.1).name('LOD render scale (px)').onChange(push('splatLodRenderScale')),
+      splatPerfFolder.add(tAny, 'splatLodSplatCount', 0, 5_000_000, 50_000).name('Splat budget (0=auto)').onChange(push('splatLodSplatCount')),
+      splatPerfFolder.add(tAny, 'splatLodSplatScale', 0.05, 2, 0.01).name('Scale × platform default').onChange(push('splatLodSplatScale')),
+      splatPerfFolder.add(tAny, 'splatLodRenderScale', 1, 5, 0.1).name('Min splat size (px)').onChange(push('splatLodRenderScale')),
+      splatPerfFolder.add(tAny, 'splatMinPixelRadius', 0, 4, 0.05).name('Min pixel radius').onChange(push('splatMinPixelRadius')),
       splatPerfFolder.add(tAny, 'splatMaxStdDev', Math.sqrt(4), Math.sqrt(9), 0.01).name('Max std dev').onChange(push('splatMaxStdDev')),
-    )
+      splatPerfFolder.add(tAny, 'splatLodInflate').name('LoD inflate (soften)').onChange(push('splatLodInflate')),
+    ]
+    tracked.push(...splatPerfControls)
+
+    // Foveation sub-folder — under-promoted Spark 2.1 power. Tightening the front cone
+    // (`splatConeFov0Deg`) is usually the single biggest perf win because the renderer
+    // streams way fewer chunks for what's not in front of you.
+    const foveationFolder = splatPerfFolder.addFolder('Foveation (cone fade-off)')
+    const foveationControls = [
+      foveationFolder.add(tAny, 'splatConeFov0Deg', 0, 180, 1).name('Full-res cone (°)').onChange(push('splatConeFov0Deg')),
+      foveationFolder.add(tAny, 'splatConeFovDeg', 0, 180, 1).name('Outer cone (°)').onChange(push('splatConeFovDeg')),
+      foveationFolder.add(tAny, 'splatConeFoveate', 0, 1, 0.01).name('Peripheral detail').onChange(push('splatConeFoveate')),
+      foveationFolder.add(tAny, 'splatBehindFoveate', 0, 1, 0.01).name('Behind detail').onChange(push('splatBehindFoveate')),
+    ]
+    tracked.push(...foveationControls)
+
+    // Preset buttons — one-click reset everything to a curated performance/quality point.
+    const refreshPerfDisplay = () => {
+      splatPerfControls.forEach((c) => c.updateDisplay())
+      foveationControls.forEach((c) => c.updateDisplay())
+    }
+    const applyPreset = (preset: SplatPerfPreset) => () => {
+      useWizardTuning.getState().applySplatPerfPreset(preset)
+      Object.assign(tAny, SPLAT_PERF_PRESETS[preset])
+      refreshPerfDisplay()
+    }
+    splatPerfFolder.add({ p: applyPreset('performance') }, 'p').name('▶ Preset: Performance')
+    splatPerfFolder.add({ p: applyPreset('balanced') }, 'p').name('▶ Preset: Balanced')
+    splatPerfFolder.add({ p: applyPreset('quality') }, 'p').name('▶ Preset: Quality')
+    // Keep the tracked array in sync with sliders so the global Reset still works.
+    const unsubSplatPerfTuning = useWizardTuning.subscribe((s, prev) => {
+      if (
+        s.splatLodEnabled !== prev.splatLodEnabled ||
+        s.splatLodSplatCount !== prev.splatLodSplatCount ||
+        s.splatLodSplatScale !== prev.splatLodSplatScale ||
+        s.splatLodRenderScale !== prev.splatLodRenderScale ||
+        s.splatMinPixelRadius !== prev.splatMinPixelRadius ||
+        s.splatMaxStdDev !== prev.splatMaxStdDev ||
+        s.splatLodInflate !== prev.splatLodInflate ||
+        s.splatConeFov0Deg !== prev.splatConeFov0Deg ||
+        s.splatConeFovDeg !== prev.splatConeFovDeg ||
+        s.splatConeFoveate !== prev.splatConeFoveate ||
+        s.splatBehindFoveate !== prev.splatBehindFoveate
+      ) {
+        Object.assign(tAny, {
+          splatLodEnabled: s.splatLodEnabled,
+          splatLodSplatCount: s.splatLodSplatCount,
+          splatLodSplatScale: s.splatLodSplatScale,
+          splatLodRenderScale: s.splatLodRenderScale,
+          splatMinPixelRadius: s.splatMinPixelRadius,
+          splatMaxStdDev: s.splatMaxStdDev,
+          splatLodInflate: s.splatLodInflate,
+          splatConeFov0Deg: s.splatConeFov0Deg,
+          splatConeFovDeg: s.splatConeFovDeg,
+          splatConeFoveate: s.splatConeFoveate,
+          splatBehindFoveate: s.splatBehindFoveate,
+        })
+        refreshPerfDisplay()
+      }
+    })
 
     // ── Character model ──────────────────────────────────────────────────────
     const dogFolder = gui.addFolder('Character model')
@@ -307,6 +372,7 @@ export function WizardGui() {
     // Default-folder collapse state mirrors the astronaut demo (everything open).
     return () => {
       unsubSplatTuning()
+      unsubSplatPerfTuning()
       gui.destroy()
       guiRef.current = null
       // Suppress unused-tracked warning; refs kept to allow future updateDisplay() reset.
