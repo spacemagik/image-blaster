@@ -315,13 +315,15 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
 
   spawnFeetY: 4,
 
+  // Reset for fantasy8 — the fantasy5-tuned offsets don't apply to the new origin.
+  // Use the in-canvas gizmo + GUI sliders to dial these in for whatever world is loaded.
   colliderOffsetX: 0,
-  colliderOffsetY: -7.599,
+  colliderOffsetY: 0,
   colliderOffsetZ: 0,
 
-  splatOffsetX: 4.07184,
-  splatOffsetY: 0.495,
-  splatOffsetZ: 5.90625,
+  splatOffsetX: 0,
+  splatOffsetY: 0,
+  splatOffsetZ: 0,
   splatRotationDegX: 0,
   splatRotationDegY: 0,
   splatRotationDegZ: 0,
@@ -361,7 +363,9 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // tuning sessions would otherwise mask the new defaults.
       // v18: Spark 2.1 LoD upgrade — new defaults for foveation + splat budget;
       // bump so the upgraded defaults apply on next page load.
-      version: 18,
+      // v19: cleared collider/splat offsets back to 0 for fantasy8 (the fantasy5
+      // values stopped being meaningful when the world assets changed).
+      version: 19,
       partialize: (s) => {
         const {
           resetToken: _resetToken,

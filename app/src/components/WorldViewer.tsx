@@ -276,17 +276,36 @@ export function WorldViewer({
                 </Suspense>
               </OptionalAssetBoundary>
             )}
+            {/*
+              Object placements ride along with the collider GLB offset so they sit on
+              the visible floor instead of the y=0 world ground plane. The offset is
+              encoded into the React key (`obj-…`) on purpose: parent <group> position
+              updates don't move already-spawned RigidBodies in Rapier — only a remount
+              re-anchors them. So when you drag the collider Y slider, all object
+              instances briefly re-spawn at the new world position (acceptable trade
+              for an alignment workflow; the Respawn flow already re-keys Physics).
+            */}
             {showObjects && !editing && (
               <Suspense fallback={null}>
-                <ObjectGrid
-                  objects={objectPhysicsAssets}
-                  placements={objectPlacements}
-                />
+                <group
+                  key={`obj-${colliderOffsetX.toFixed(3)}-${colliderOffsetY.toFixed(3)}-${colliderOffsetZ.toFixed(3)}`}
+                  position={[colliderOffsetX, colliderOffsetY, colliderOffsetZ]}
+                >
+                  <ObjectGrid
+                    objects={objectPhysicsAssets}
+                    placements={objectPlacements}
+                  />
+                </group>
               </Suspense>
             )}
             {showObjects && editing && (
               <Suspense fallback={null}>
-                <PlacementEditorScene controller={placementEditor} renderMode={objectRenderMode} />
+                <group
+                  key={`edit-${colliderOffsetX.toFixed(3)}-${colliderOffsetY.toFixed(3)}-${colliderOffsetZ.toFixed(3)}`}
+                  position={[colliderOffsetX, colliderOffsetY, colliderOffsetZ]}
+                >
+                  <PlacementEditorScene controller={placementEditor} renderMode={objectRenderMode} />
+                </group>
               </Suspense>
             )}
             <GroundPlane
