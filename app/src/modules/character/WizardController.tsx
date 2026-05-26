@@ -371,8 +371,13 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       // Apply tuning-driven KCC settings each frame so toggles in the GUI take effect live.
       if (t.enableWalkStairs) controller.enableAutostep(0.4, 0.2, true)
       else controller.disableAutostep()
-      if (t.enableStickToFloor) controller.enableSnapToGround(0.5)
+      // Per-frame snap-to-ground distance + max slope, driven by the GUI. Sparse
+      // collider GLBs (e.g. fantasy8.glb) need a wider snap distance than the
+      // 0.5 m Rapier default or the character un-grounds on every triangle edge
+      // and slides into "fly mode" while walking.
+      if (t.enableStickToFloor) controller.enableSnapToGround(t.stickToFloorDistance)
       else controller.disableSnapToGround()
+      controller.setMaxSlopeClimbAngle(THREE.MathUtils.degToRad(t.maxSlopeClimbDeg))
 
       // ── 1. Build camera-relative input direction ─────────────────────────────
       // Ported from Astronaut/character-controller-final main.ts (lines 1299–1313):

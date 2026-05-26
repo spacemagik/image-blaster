@@ -71,6 +71,11 @@ export function WizardGui() {
       physFolder.add(tAny, 'gravityY', -60, -5, 0.5).name('Gravity Y').onChange(push('gravityY')),
       physFolder.add(tAny, 'enableWalkStairs').name('Walk stairs').onChange(push('enableWalkStairs')),
       physFolder.add(tAny, 'enableStickToFloor').name('Stick to floor').onChange(push('enableStickToFloor')),
+      // Wider snap distance keeps the character planted on sparse collider GLBs
+      // (e.g. fantasy8.glb). Below ~0.6 m the character flips into airborne /
+      // "fly mode" on every triangle edge.
+      physFolder.add(tAny, 'stickToFloorDistance', 0.1, 5, 0.05).name('Floor snap dist (m)').onChange(push('stickToFloorDistance')),
+      physFolder.add(tAny, 'maxSlopeClimbDeg', 20, 85, 1).name('Max slope climb (°)').onChange(push('maxSlopeClimbDeg')),
     )
 
     // ── Lighting ─────────────────────────────────────────────────────────────

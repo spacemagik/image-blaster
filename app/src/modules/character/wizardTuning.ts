@@ -31,6 +31,21 @@ export interface WizardTuning {
   gravityY: number
   enableWalkStairs: boolean
   enableStickToFloor: boolean
+  /**
+   * Rapier KCC `enableSnapToGround` distance in metres. If the floor under the
+   * character drops by *less than* this every frame the controller treats the
+   * character as still grounded (no airborne animation, no momentum loss).
+   *
+   * Bump this up if the collider GLB has sparse/large triangles or small dips
+   * that flip the character into "fly mode" while walking.
+   */
+  stickToFloorDistance: number
+  /**
+   * Max angle (degrees) the KCC will autostep over. Larger values let the
+   * character climb taller geometry without going airborne; smaller values
+   * keep them planted on flat ground.
+   */
+  maxSlopeClimbDeg: number
   controlMovementDuringJump: boolean
   enableCharacterInertia: boolean
 
@@ -237,6 +252,15 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   gravityY: -25,
   enableWalkStairs: true,
   enableStickToFloor: true,
+  // 0.5 was too tight for sparse colliders like fantasy8.glb — the character
+  // unstuck from the floor on every triangle edge and went into airborne / fly
+  // mode while walking. 1.5 m is wide enough to bridge those dips without
+  // making the character "stick" to ceilings or low overhangs.
+  stickToFloorDistance: 1.5,
+  // Rapier's KCC default is ~45°. Sparse triangulated GLBs sometimes have
+  // near-vertical micro-facets along the floor; bumping this lets the
+  // controller treat them as walkable instead of slide surfaces.
+  maxSlopeClimbDeg: 60,
   controlMovementDuringJump: true,
   enableCharacterInertia: true,
 
@@ -365,7 +389,11 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // bump so the upgraded defaults apply on next page load.
       // v19: cleared collider/splat offsets back to 0 for fantasy8 (the fantasy5
       // values stopped being meaningful when the world assets changed).
-      version: 19,
+      // v20: added stickToFloorDistance + maxSlopeClimbDeg knobs to fight
+      // unintentional airborne / "fly mode" while walking on sparse colliders
+      // like fantasy8.glb. Existing persisted state lacks these fields, so bump
+      // the version to force defaults to apply.
+      version: 20,
       partialize: (s) => {
         const {
           resetToken: _resetToken,
