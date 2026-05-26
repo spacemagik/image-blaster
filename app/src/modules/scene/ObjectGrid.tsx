@@ -27,6 +27,15 @@ interface RenderedObject {
 interface Props {
   objects: WorldObjectAsset[]
   placements?: WorldObjectPlacement[]
+  /**
+   * World-space offset to add to every placement before it reaches the Rapier
+   * RigidBody. We bake it in here (instead of wrapping the grid in a
+   * <group position={offset}>) because `SceneObject` re-applies its position
+   * prop via `RapierRigidBody.setTranslation`, which writes in *world* space
+   * and silently ignores any parent group transform. Without baking, the
+   * objects snap back to y=0 on every remount.
+   */
+  offset?: [number, number, number]
 }
 
 interface ObjectLoadErrorBoundaryProps {
@@ -65,6 +74,7 @@ class ObjectLoadErrorBoundary extends Component<ObjectLoadErrorBoundaryProps, Ob
 function resolveRenderedObjects(
   objects: WorldObjectAsset[],
   placements?: WorldObjectPlacement[],
+  offset?: [number, number, number],
 ): RenderedObject[] {
   const assetsById = new Map<string, WorldObjectAsset>()
   for (const object of objects) {
@@ -73,13 +83,18 @@ function resolveRenderedObjects(
     assetsById.set(object.baseObjectId, object)
     assetsById.set(`${object.sourceWorldSlug}/${object.baseObjectId}`, object)
   }
+  const [ox, oy, oz] = offset ?? [0, 0, 0]
   return getInitialPlacements(objects, placements).flatMap((placement) => {
     const asset = assetsById.get(placement.assetId ?? placement.objectId) ?? assetsById.get(placement.objectId)
     if (!asset) return []
     return [{
       instanceId: placement.instanceId,
       asset,
-      position: placement.position,
+      position: [
+        placement.position[0] + ox,
+        placement.position[1] + oy,
+        placement.position[2] + oz,
+      ],
       rotation: placement.rotation,
       scale: placement.scale,
       physics: placement.physics ?? 'rigidbody',
@@ -133,10 +148,17 @@ function nearestGrabbableObjectId(
   return grabbableObjectIds.has(fallbackObjectId) ? fallbackObjectId : null
 }
 
-export function ObjectGrid({ objects, placements }: Props) {
+export function ObjectGrid({ objects, placements, offset }: Props) {
   const { camera, gl } = useThree()
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null)
-  const renderedObjects = useMemo(() => resolveRenderedObjects(objects, placements), [objects, placements])
+  const offsetKey = offset ? `${offset[0]},${offset[1]},${offset[2]}` : '0,0,0'
+  const renderedObjects = useMemo(
+    () => resolveRenderedObjects(objects, placements, offset),
+    // `offset` is a tuple recreated on every render in the parent; depend on its
+    // string form so we only recompute when the values actually change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [objects, placements, offsetKey],
+  )
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const objectResetToken = useDebugStore((s) => s.objectResetToken)
   const objectRefs = useRef(new Map<string, RefObject<SceneObjectHandle | null>>())

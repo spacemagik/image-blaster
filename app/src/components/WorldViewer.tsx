@@ -278,34 +278,30 @@ export function WorldViewer({
             )}
             {/*
               Object placements ride along with the collider GLB offset so they sit on
-              the visible floor instead of the y=0 world ground plane. The offset is
-              encoded into the React key (`obj-…`) on purpose: parent <group> position
-              updates don't move already-spawned RigidBodies in Rapier — only a remount
-              re-anchors them. So when you drag the collider Y slider, all object
-              instances briefly re-spawn at the new world position (acceptable trade
-              for an alignment workflow; the Respawn flow already re-keys Physics).
+              the visible GLB floor instead of the y=0 world ground plane. We pass the
+              offset down through `ObjectGrid` and bake it into each placement before
+              it reaches `SceneObject`, because Rapier's `RigidBody.setTranslation` (in
+              `SceneObject`'s useEffect) writes the WORLD position and ignores any
+              parent <group> transform — wrapping the grid in a <group position=offset>
+              gets silently overridden on every mount.
+
+              Editor mode keeps a plain offset prop too; `EditableObject` uses a vanilla
+              <group> (no Rapier), but TransformControls bakes world matrices back to
+              scene.json, so we DO NOT pre-offset in editor mode to avoid corrupting
+              saved positions. The collider's offset is only visualised at runtime.
             */}
             {showObjects && !editing && (
               <Suspense fallback={null}>
-                <group
-                  key={`obj-${colliderOffsetX.toFixed(3)}-${colliderOffsetY.toFixed(3)}-${colliderOffsetZ.toFixed(3)}`}
-                  position={[colliderOffsetX, colliderOffsetY, colliderOffsetZ]}
-                >
-                  <ObjectGrid
-                    objects={objectPhysicsAssets}
-                    placements={objectPlacements}
-                  />
-                </group>
+                <ObjectGrid
+                  objects={objectPhysicsAssets}
+                  placements={objectPlacements}
+                  offset={[colliderOffsetX, colliderOffsetY, colliderOffsetZ]}
+                />
               </Suspense>
             )}
             {showObjects && editing && (
               <Suspense fallback={null}>
-                <group
-                  key={`edit-${colliderOffsetX.toFixed(3)}-${colliderOffsetY.toFixed(3)}-${colliderOffsetZ.toFixed(3)}`}
-                  position={[colliderOffsetX, colliderOffsetY, colliderOffsetZ]}
-                >
-                  <PlacementEditorScene controller={placementEditor} renderMode={objectRenderMode} />
-                </group>
+                <PlacementEditorScene controller={placementEditor} renderMode={objectRenderMode} />
               </Suspense>
             )}
             <GroundPlane
