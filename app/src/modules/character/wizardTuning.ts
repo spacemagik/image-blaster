@@ -252,15 +252,14 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   gravityY: -25,
   enableWalkStairs: true,
   enableStickToFloor: true,
-  // 0.5 was too tight for sparse colliders like fantasy8.glb — the character
-  // unstuck from the floor on every triangle edge and went into airborne / fly
-  // mode while walking. 1.5 m is wide enough to bridge those dips without
-  // making the character "stick" to ceilings or low overhangs.
-  stickToFloorDistance: 1.5,
+  // 0.5 was too tight, 1.5 still gapped on fantasy8/10.glb's big triangles
+  // (some edges dip 2+ m). 3 m bridges almost any sparse mesh while still
+  // letting the character clear small overhangs without snapping up to them.
+  stickToFloorDistance: 3,
   // Rapier's KCC default is ~45°. Sparse triangulated GLBs sometimes have
   // near-vertical micro-facets along the floor; bumping this lets the
   // controller treat them as walkable instead of slide surfaces.
-  maxSlopeClimbDeg: 60,
+  maxSlopeClimbDeg: 70,
   controlMovementDuringJump: true,
   enableCharacterInertia: true,
 
@@ -275,7 +274,11 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   dogOffsetZ: 0,
   dogTurnSpeed: 6,
   dogWalkSpeedThreshold: 0.08,
-  dogAnimGroundReleaseHold: 0.11,
+  // 0.11 s was tuned for flat ground; on sparse colliders the character pops
+  // off the ground for a frame or two on every triangle edge and the walk
+  // animation snapped to fall/jump — looked like accidental "fly mode".
+  // 0.45 s holds the grounded animation through any normal walking dip.
+  dogAnimGroundReleaseHold: 0.45,
   dogAnimWalkSpeedSmoothing: 40,
   dogAnimCrossfade: 0.28,
   dogWalkAnimTimeScale: 0.85,
@@ -393,7 +396,37 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // unintentional airborne / "fly mode" while walking on sparse colliders
       // like fantasy8.glb. Existing persisted state lacks these fields, so bump
       // the version to force defaults to apply.
-      version: 20,
+      // v21: fantasy10.glb's sparse triangulation still flipped the character
+      // into fly mode at the v20 defaults. Bumped snap distance 1.5→3, slope
+      // 60→70, anim ground-release-hold 0.11→0.45. Migrate only overwrites
+      // these three fields so collider / splat / spawn offsets users have
+      // dialed in survive the version bump.
+      version: 21,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      migrate: (persistedState: any, fromVersion: number) => {
+        if (!persistedState || typeof persistedState !== 'object') return persistedState
+        // Always force the v21 anti-fly-mode tuning regardless of what
+        // upgrade path the user came from — we want the new defaults to win
+        // even if they had stale per-field values from v20 already.
+        return {
+          ...persistedState,
+          stickToFloorDistance: DEFAULT_WIZARD_TUNING.stickToFloorDistance,
+          maxSlopeClimbDeg: DEFAULT_WIZARD_TUNING.maxSlopeClimbDeg,
+          dogAnimGroundReleaseHold: DEFAULT_WIZARD_TUNING.dogAnimGroundReleaseHold,
+          // Older persisted states (v19 and below) lack these splat-perf
+          // fields; pull them in from defaults so SparkRenderer doesn't see
+          // `undefined`s and skip its setters.
+          ...(fromVersion < 18 && {
+            splatLodSplatCount: DEFAULT_WIZARD_TUNING.splatLodSplatCount,
+            splatMinPixelRadius: DEFAULT_WIZARD_TUNING.splatMinPixelRadius,
+            splatConeFov0Deg: DEFAULT_WIZARD_TUNING.splatConeFov0Deg,
+            splatConeFovDeg: DEFAULT_WIZARD_TUNING.splatConeFovDeg,
+            splatConeFoveate: DEFAULT_WIZARD_TUNING.splatConeFoveate,
+            splatBehindFoveate: DEFAULT_WIZARD_TUNING.splatBehindFoveate,
+            splatLodInflate: DEFAULT_WIZARD_TUNING.splatLodInflate,
+          }),
+        }
+      },
       partialize: (s) => {
         const {
           resetToken: _resetToken,
