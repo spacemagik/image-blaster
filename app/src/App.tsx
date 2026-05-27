@@ -9,7 +9,7 @@ import { fetchWorlds, loadWorlds } from './utils/worldLoader'
 import { useDebugStore } from './store/debug'
 import { isEditableTarget } from './utils/dom'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset } from './types/world'
-import { TerminalWindowIcon } from '@phosphor-icons/react'
+import { TerminalWindowIcon, XIcon } from '@phosphor-icons/react'
 
 const LevaPanel = import.meta.env.DEV
   ? lazy(() => import('leva').then((module) => ({ default: module.Leva })))
@@ -70,8 +70,10 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
   const [match, params] = useRoute('/:slug')
   const levaCollapsed = useDebugStore((s) => s.levaCollapsed)
   const setLevaCollapsed = useDebugStore((s) => s.setLevaCollapsed)
+  const playMode = useDebugStore((s) => s.playMode)
+  const togglePlayMode = useDebugStore((s) => s.togglePlayMode)
+  const setPlayMode = useDebugStore((s) => s.setPlayMode)
   const [location] = useLocation()
-  const [uiHidden, setUiHidden] = useState(false)
   const [sceneProjectEnabled, setSceneProjectEnabled] = useState(true)
   const [selectedWorldVersions, setSelectedWorldVersions] = useState<Record<string, number>>({})
   const [hoveredObjectAssetId, setHoveredObjectAssetId] = useState<string | null>(null)
@@ -82,7 +84,8 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
   const entry = worlds.find((w) => w.slug === slug) ?? worlds[0]
   const editing = Boolean(editMatch)
   const showLeva = import.meta.env.VITE_SHOW_LEVA === 'true'
-  const uiVisible = !uiHidden
+  // Editor mode forces play-mode off — you can't tune things you can't see.
+  const uiVisible = !playMode || editing
   const defaultWorldVersionIndex = entry.worldVersions[entry.worldVersions.length - 1]?.index
   const activeWorldVersionIndex = selectedWorldVersions[entry.slug] ?? defaultWorldVersionIndex
   const activeWorldVersion = entry.worldVersions.find((version) => version.index === activeWorldVersionIndex)
@@ -122,14 +125,20 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isEditableTarget(event.target)) return
-      if (event.code !== 'Backquote') return
-      event.preventDefault()
-      setUiHidden((hidden) => !hidden)
+      // Backtick toggles play-mode (hides all UI). Escape exits play-mode
+      // even from arbitrary focus state so the user is never stranded.
+      if (event.code === 'Backquote') {
+        event.preventDefault()
+        togglePlayMode()
+      } else if (event.code === 'Escape' && playMode) {
+        event.preventDefault()
+        setPlayMode(false)
+      }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [playMode, togglePlayMode, setPlayMode])
 
   if (!editMatch && !match) {
     return <Redirect to={`/${worlds[0].slug}`} />
@@ -205,6 +214,17 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
         <div className="fixed inset-x-0 bottom-4 z-20 flex justify-center px-4 sm:left-4 sm:right-auto sm:justify-start sm:px-0">
           <BottomLeftControls />
         </div>
+      )}
+      {playMode && !editing && (
+        <button
+          type="button"
+          onClick={() => setPlayMode(false)}
+          className="fixed top-4 right-4 z-30 flex items-center gap-2 rounded-full bg-black/55 px-3 py-1.5 text-xs font-medium text-white/90 backdrop-blur-md ring-1 ring-white/10 transition hover:bg-black/70"
+        >
+          <XIcon size={14} weight="bold" />
+          Exit play mode
+          <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-white/70">esc</span>
+        </button>
       )}
     </div>
   )

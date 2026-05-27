@@ -66,6 +66,11 @@ interface DebugStore {
   setSunColor: (v: string) => void
   levaCollapsed: boolean
   setLevaCollapsed: (v: boolean) => void
+  /** Hides all overlay UI (sidebar, lil-gui, BottomLeftControls, etc.) so
+   *  the canvas reads as a clean game view. Backtick (`) toggles it. */
+  playMode: boolean
+  setPlayMode: (v: boolean) => void
+  togglePlayMode: () => void
 }
 
 export const useDebugStore = create<DebugStore>()(
@@ -125,6 +130,11 @@ export const useDebugStore = create<DebugStore>()(
       setSunColor: (sunColor) => set({ sunColor }),
       levaCollapsed: false,
       setLevaCollapsed: (levaCollapsed) => set({ levaCollapsed }),
+      // Intentionally NOT in `partialize` below — play mode always starts
+      // off on a fresh page so the user never gets surprise-hidden tools.
+      playMode: false,
+      setPlayMode: (playMode) => set({ playMode }),
+      togglePlayMode: () => set((s) => ({ playMode: !s.playMode })),
     }),
     {
       name: 'image-blaster-debug',

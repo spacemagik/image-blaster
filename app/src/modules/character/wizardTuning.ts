@@ -13,6 +13,7 @@
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { SPARKLE_PRESETS, type SparklePreset } from '../splat/sparkle'
 
 export type ColorRGB = [number, number, number]
 
@@ -182,6 +183,61 @@ export interface WizardTuning {
   rocketZ: number
   rocketRotY: number
   rocketScale: number
+
+  // Sparkles — Spark 2.1 particle effect (sparkle.ts wrapping generators.snowBox).
+  // One single configurable effect; preset picker re-seeds the per-field knobs
+  // below from `SPARKLE_PRESETS` via `applySparklePreset`.
+  sparkleEnabled: boolean
+  sparklePreset: SparklePreset
+  // Position of the effect bounding box (Vector3-on-disk as flat XYZ).
+  sparklePosX: number
+  sparklePosY: number
+  sparklePosZ: number
+  /** Horizontal half-extent (X & Z) of the spawn box. Particles emit
+   *  within `(2*radius) × (2*height) × (2*radius)` around the position. */
+  sparkleRadius: number
+  /** Vertical half-extent (Y). Keep small (≤ 1) for plane-like spawn
+   *  curtains (rain, fairy dust ceiling, etc.). */
+  sparkleHeight: number
+  // Per-particle look.
+  sparkleDensity: number      // particles per box-volume unit (input to count)
+  /** Hard cap on total particles, regardless of `density × volume`. Without
+   *  this, growing radius even slightly explodes the splat count (1M+) and
+   *  freezes Spark. 8000 is a safe ceiling for forest-mist effects. */
+  sparkleMaxSplats: number
+  sparkleOpacity: number      // 0..1 multiplier
+  sparkleMinScale: number     // smallest particle size
+  sparkleMaxScale: number     // largest particle size
+  sparkleColor1: ColorRGB     // gradient endpoint 1
+  sparkleColor2: ColorRGB     // gradient endpoint 2
+  // Motion.
+  sparkleFallVelocity: number // speed along `fallDirection`
+  sparkleWanderScale: number  // turbulence amplitude
+  sparkleWanderVariance: number
+  sparkleFallDirX: number     // direction vector; +Y rises, -Y falls
+  sparkleFallDirY: number
+  sparkleFallDirZ: number
+  /** In-canvas TransformControls gizmo for dragging / scaling the sparkle box. */
+  sparkleGizmoEnabled: boolean
+  sparkleGizmoMode: 'translate' | 'rotate' | 'scale'
+  /** Show a wireframe outline of the spawn box so the user can find the effect. */
+  sparkleShowBox: boolean
+  /** When true, the spawn slab follows the character's feet every frame so
+   *  particles are always around the player (illusion of world-wide atmosphere
+   *  without paying for world-wide splats). `sparklePos{X,Y,Z}` then act as a
+   *  per-axis offset relative to the character. When false, those fields are
+   *  absolute world coordinates and the slab stays put. */
+  sparkleFollowCharacter: boolean
+  /** Exponential follow time-constant in seconds. 0 = the slab snaps to the
+   *  player's feet every frame (the previous behaviour), which makes walking
+   *  look like an obvious teleport because all 8K particles translate together
+   *  and dwarf their own wander motion. Values > 0 make the slab lerp toward
+   *  the target with `α = 1 − exp(−dt / τ)`, so the spawn area trails behind
+   *  the player and the natural per-particle wander stays the dominant motion.
+   *  Default 0.6 s = noticeable damping at sprint speed but no visible lag when
+   *  idle. Larger values look more like world-space fog; smaller values keep
+   *  the slab tightly centred on the player. */
+  sparkleFollowSmoothing: number
 }
 
 export type SplatPerfPreset = 'performance' | 'balanced' | 'quality'
@@ -240,8 +296,44 @@ export interface WizardTuningStore extends WizardTuning {
   setTuning: (partial: Partial<WizardTuning>) => void
   resetTuning: () => void
   applySplatPerfPreset: (preset: SplatPerfPreset) => void
+  /** Re-seed every per-field sparkle knob (colours, motion, density…) from a preset. */
+  applySparklePreset: (preset: SparklePreset) => void
   resetToken: number
   bumpResetToken: () => void
+}
+
+/**
+ * Multiplier applied to a preset's `minScale` / `maxScale` when we copy it into
+ * the tuning store. The raw `SPARKLE_PRESETS` values (e.g. fairy's 0.001/0.005)
+ * are calibrated for the near-camera Sparkle demo viewer; at our third-person
+ * gameplay distance (camera ~3–5 m off the character) they project sub-pixel
+ * and disappear entirely. 10× matches what `DEFAULT_WIZARD_TUNING` does for the
+ * `magic` preset on first load (0.002→0.02, 0.009→0.09), so switching presets
+ * via the GUI no longer makes the particles silently invisible.
+ */
+const SPARKLE_PRESET_GAMEPLAY_SCALE = 10
+
+/** Convert a Sparkle preset into the flat field set we persist in the store. */
+function sparklePresetToTuning(preset: SparklePreset): Partial<WizardTuning> {
+  const p = SPARKLE_PRESETS[preset]
+  const c1 = p.color1!
+  const c2 = p.color2!
+  const dir = p.fallDirection!
+  return {
+    sparklePreset: preset,
+    sparkleDensity: p.density!,
+    sparkleOpacity: p.opacity!,
+    sparkleMinScale: p.minScale! * SPARKLE_PRESET_GAMEPLAY_SCALE,
+    sparkleMaxScale: p.maxScale! * SPARKLE_PRESET_GAMEPLAY_SCALE,
+    sparkleColor1: [c1.r, c1.g, c1.b],
+    sparkleColor2: [c2.r, c2.g, c2.b],
+    sparkleFallVelocity: p.fallVelocity!,
+    sparkleWanderScale: p.wanderScale!,
+    sparkleWanderVariance: p.wanderVariance!,
+    sparkleFallDirX: dir.x,
+    sparkleFallDirY: dir.y,
+    sparkleFallDirZ: dir.z,
+  }
 }
 
 export const DEFAULT_WIZARD_TUNING: WizardTuning = {
@@ -253,9 +345,10 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   enableWalkStairs: true,
   enableStickToFloor: true,
   // 0.5 was too tight, 1.5 still gapped on fantasy8/10.glb's big triangles
-  // (some edges dip 2+ m). 3 m bridges almost any sparse mesh while still
-  // letting the character clear small overhangs without snapping up to them.
-  stickToFloorDistance: 3,
+  // (some edges dip 2+ m). 5 m bridges almost any sparse mesh AND gives
+  // sprint-speed traversal (17.5 m/s = 0.29 m/frame at 60 fps) enough
+  // headroom that hopping a ledge edge doesn't break the snap chain.
+  stickToFloorDistance: 5,
   // Rapier's KCC default is ~45°. Sparse triangulated GLBs sometimes have
   // near-vertical micro-facets along the floor; bumping this lets the
   // controller treat them as walkable instead of slide surfaces.
@@ -277,8 +370,9 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   // 0.11 s was tuned for flat ground; on sparse colliders the character pops
   // off the ground for a frame or two on every triangle edge and the walk
   // animation snapped to fall/jump — looked like accidental "fly mode".
-  // 0.45 s holds the grounded animation through any normal walking dip.
-  dogAnimGroundReleaseHold: 0.45,
+  // 0.75 s holds the grounded animation through sustained sprint-over-edge
+  // sequences (0.45 s was enough for walk but sprint clears ledges faster).
+  dogAnimGroundReleaseHold: 0.75,
   dogAnimWalkSpeedSmoothing: 40,
   dogAnimCrossfade: 0.28,
   dogWalkAnimTimeScale: 0.85,
@@ -367,6 +461,58 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   rocketZ: -4.3,
   rocketRotY: -67,
   rocketScale: 9.57,
+
+  // Sparkles — default off so they don't surprise users on a fresh world.
+  // The preset+per-field values mirror SPARKLE_PRESETS.magic so toggling
+  // enable shows the canonical magic look immediately; preset picker re-seeds
+  // every per-field value below via `applySparklePreset`.
+  sparkleEnabled: false,
+  sparklePreset: 'magic',
+  // Character-following defaults: a 20m-radius / 2m-thick slab that rides
+  // the player's feet (sparkleFollowCharacter=true below). Position fields
+  // are interpreted as offsets from `wizardFeetPos`, so (0, 1, 0) keeps the
+  // slab bottom ~at foot level no matter where the player walks.
+  //
+  // 20m radius is roughly camera-visible range, so every splat the cap
+  // allows is on-screen — no waste like the previous 200m world-spanning
+  // version. At density 180 the naive count is ~57K (180 × 40 × 2 × 40),
+  // capped to 8K → ~0.13 splats/m³, plenty visible at typical 3-rd-person
+  // camera distance.
+  sparklePosX: 0,
+  sparklePosY: 1,
+  sparklePosZ: 0,
+  sparkleRadius: 20,
+  sparkleHeight: 1,
+  sparkleDensity: 180,
+  sparkleMaxSplats: 8000,
+  sparkleOpacity: 0.92,
+  // Bumped 10× from the magic preset's 0.002/0.009. The original values
+  // come from a near-camera viewer (sparkle.js demo) where you're looking
+  // at the box from <1m away; at gameplay third-person distance they're
+  // sub-pixel and invisible. 0.02–0.06 = 2cm–6cm splats — clearly visible
+  // from 3–5m without looking like floating beach balls.
+  sparkleMinScale: 0.02,
+  sparkleMaxScale: 0.06,
+  sparkleColor1: [0.85, 0.25, 1.0],
+  sparkleColor2: [1.0, 0.85, 0.1],
+  sparkleFallVelocity: 0.04,
+  sparkleWanderScale: 0.025,
+  sparkleWanderVariance: 4,
+  sparkleFallDirX: 0,
+  sparkleFallDirY: 1,
+  sparkleFallDirZ: 0,
+  sparkleGizmoEnabled: false,
+  sparkleGizmoMode: 'translate',
+  sparkleShowBox: false,
+  sparkleFollowCharacter: true,
+  // Defaults to 0 (snap-follow): the spawn box tracks the player tightly,
+  // and SparkleScene's per-frame counter-drift cancels that translation in
+  // particle space so individual particles stay in WORLD space anyway. So
+  // tight follow no longer looks synthetic. The slider stays exposed in the
+  // GUI for users who want a deliberate trailing "fog" feel (set τ > 0 to
+  // make the slab itself lag behind the player; particles still stay in
+  // world space, but the *region* of visible particles drifts too).
+  sparkleFollowSmoothing: 0,
 }
 
 export const useWizardTuning = create<WizardTuningStore>()(
@@ -377,6 +523,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       setTuning: (partial) => set(partial),
       resetTuning: () => set({ ...DEFAULT_WIZARD_TUNING }),
       applySplatPerfPreset: (preset) => set(SPLAT_PERF_PRESETS[preset]),
+      applySparklePreset: (preset) => set(sparklePresetToTuning(preset)),
       bumpResetToken: () => set((s) => ({ resetToken: s.resetToken + 1 })),
     }),
     {
@@ -401,7 +548,36 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // 60→70, anim ground-release-hold 0.11→0.45. Migrate only overwrites
       // these three fields so collider / splat / spawn offsets users have
       // dialed in survive the version bump.
-      version: 21,
+      // v22: added Sparkle particle FX (preset + colour/move/scale knobs).
+      // Migrate from <22 pulls in default sparkle fields so SparkleScene
+      // doesn't see `undefined` on hydrate. v23 nudges the sparkle position
+      // + motion fields to "ground mist rising" defaults (slab bottom at
+      // y=0, visible upward velocity) — preserves colours/density/scale
+      // tuning so anyone who customised those keeps them. v24 introduces
+      // `sparkleMaxSplats` (hard cap) AND re-applies sane radius/height
+      // because earlier v23 defaults could blow past 1M splats and freeze
+      // Spark for tens of seconds during first paint. v25 bumps default
+      // particle scales 10× because the preset values (calibrated for a
+      // near-camera viewer) were sub-pixel at gameplay distance. v26
+      // sizes the slab to fully cover fantasy2's collider GLB
+      // (radius 12→200, cap 8000→50000) so particles surround the
+      // player no matter where they walk in the 365×331m world. v27
+      // pivots to character-following (slab rides feet, position fields
+      // become offsets) and drops radius back to 20m / cap to 8K — every
+      // splat now lives near the camera so the world-spanning sparseness
+      // is no longer needed. v28 adds `sparkleFollowSmoothing` so the slab
+      // exponentially lerps toward the player instead of snapping per frame
+      // — snap-follow at walk/sprint speed was dominating the per-particle
+      // wander and looked obviously synthetic. Missing on older states reads
+      // as 0 (snap) which reproduces the bug, so migration force-applies
+      // the new default. v29 replaces the smoothing workaround with a
+      // proper fix: SparkleScene now overwrites the snowBox fall direction /
+      // velocity dynos each frame to cancel the spawn-box motion in particle
+      // space, so particles stay in WORLD space even with snap-follow.
+      // Smoothing default reverts to 0 since it's no longer needed as a
+      // workaround (still exposed for users who want a deliberate "fog"
+      // trailing feel).
+      version: 29,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -425,6 +601,102 @@ export const useWizardTuning = create<WizardTuningStore>()(
             splatBehindFoveate: DEFAULT_WIZARD_TUNING.splatBehindFoveate,
             splatLodInflate: DEFAULT_WIZARD_TUNING.splatLodInflate,
           }),
+          // v22: pull in Sparkle defaults so the new fields exist on hydrate.
+          ...(fromVersion < 22 && {
+            sparkleEnabled: DEFAULT_WIZARD_TUNING.sparkleEnabled,
+            sparklePreset: DEFAULT_WIZARD_TUNING.sparklePreset,
+            sparklePosX: DEFAULT_WIZARD_TUNING.sparklePosX,
+            sparklePosY: DEFAULT_WIZARD_TUNING.sparklePosY,
+            sparklePosZ: DEFAULT_WIZARD_TUNING.sparklePosZ,
+            sparkleRadius: DEFAULT_WIZARD_TUNING.sparkleRadius,
+            sparkleHeight: DEFAULT_WIZARD_TUNING.sparkleHeight,
+            sparkleDensity: DEFAULT_WIZARD_TUNING.sparkleDensity,
+            sparkleOpacity: DEFAULT_WIZARD_TUNING.sparkleOpacity,
+            sparkleMinScale: DEFAULT_WIZARD_TUNING.sparkleMinScale,
+            sparkleMaxScale: DEFAULT_WIZARD_TUNING.sparkleMaxScale,
+            sparkleColor1: DEFAULT_WIZARD_TUNING.sparkleColor1,
+            sparkleColor2: DEFAULT_WIZARD_TUNING.sparkleColor2,
+            sparkleFallVelocity: DEFAULT_WIZARD_TUNING.sparkleFallVelocity,
+            sparkleWanderScale: DEFAULT_WIZARD_TUNING.sparkleWanderScale,
+            sparkleWanderVariance: DEFAULT_WIZARD_TUNING.sparkleWanderVariance,
+            sparkleFallDirX: DEFAULT_WIZARD_TUNING.sparkleFallDirX,
+            sparkleFallDirY: DEFAULT_WIZARD_TUNING.sparkleFallDirY,
+            sparkleFallDirZ: DEFAULT_WIZARD_TUNING.sparkleFallDirZ,
+          }),
+          // v23: re-seat the slab on the ground + restore visible upward
+          // velocity. We force these even if the user already had sparkle
+          // fields (from a v22 install) because the original values were
+          // bad enough that nobody would have tuned them on purpose.
+          ...(fromVersion < 23 && {
+            sparklePosX: DEFAULT_WIZARD_TUNING.sparklePosX,
+            sparklePosY: DEFAULT_WIZARD_TUNING.sparklePosY,
+            sparklePosZ: DEFAULT_WIZARD_TUNING.sparklePosZ,
+            sparkleFallVelocity: DEFAULT_WIZARD_TUNING.sparkleFallVelocity,
+            sparkleFallDirX: DEFAULT_WIZARD_TUNING.sparkleFallDirX,
+            sparkleFallDirY: DEFAULT_WIZARD_TUNING.sparkleFallDirY,
+            sparkleFallDirZ: DEFAULT_WIZARD_TUNING.sparkleFallDirZ,
+          }),
+          // v24: introduce maxSplats cap AND force radius/height back to
+          // safe values (a v23 user could have radius=25, height=1.5,
+          // which is 1.35M splats without the cap — refresh-freezing).
+          ...(fromVersion < 24 && {
+            sparkleMaxSplats: DEFAULT_WIZARD_TUNING.sparkleMaxSplats,
+            sparkleRadius: DEFAULT_WIZARD_TUNING.sparkleRadius,
+            sparkleHeight: DEFAULT_WIZARD_TUNING.sparkleHeight,
+          }),
+          // v25: bump particle scales 10× — preset values (0.002..0.009)
+          // are sub-pixel at gameplay distance so users see nothing even
+          // when sparkles are correctly enabled and positioned.
+          ...(fromVersion < 25 && {
+            sparkleMinScale: DEFAULT_WIZARD_TUNING.sparkleMinScale,
+            sparkleMaxScale: DEFAULT_WIZARD_TUNING.sparkleMaxScale,
+          }),
+          // v26: size the slab to fantasy2's world collider (XZ half-extent
+          // ≈ 182m). A user on v24/v25 had radius=12 which is invisible the
+          // moment they walk more than 12m from origin; force-overwrite to
+          // 200 + bump the cap to 50K so the wider volume still has enough
+          // particles to read as atmosphere. Anyone who hand-tuned radius
+          // post-hoc will need to re-tune, but the v24/v25 defaults were
+          // unusable for actual gameplay so the overwrite is worth it.
+          //
+          // NOTE: v27 immediately undoes v26 (radius back to 20, cap back to
+          // 8K) because v27 introduces character-following — the wide slab is
+          // no longer needed. We still keep the v26 migration block so the
+          // intermediate state is consistent for anyone whose store happens
+          // to land on v26 mid-hydrate, but in practice the v27 block below
+          // overwrites both fields again.
+          ...(fromVersion < 26 && {
+            sparkleRadius: DEFAULT_WIZARD_TUNING.sparkleRadius,
+            sparkleMaxSplats: DEFAULT_WIZARD_TUNING.sparkleMaxSplats,
+          }),
+          // v27: slab now follows the character. Add the new follow toggle
+          // (existed only as `undefined` on older states), and force radius
+          // + cap back to the camera-bubble defaults because anyone on v25
+          // had radius=12 (invisible) and v26 had radius=200 (too sparse to
+          // see). Position offsets are preserved — users who manually moved
+          // the slab will keep their tuning, it just becomes an offset from
+          // feet instead of an absolute world coordinate.
+          ...(fromVersion < 27 && {
+            sparkleFollowCharacter: DEFAULT_WIZARD_TUNING.sparkleFollowCharacter,
+            sparkleRadius: DEFAULT_WIZARD_TUNING.sparkleRadius,
+            sparkleMaxSplats: DEFAULT_WIZARD_TUNING.sparkleMaxSplats,
+          }),
+          // v28: add `sparkleFollowSmoothing`. Older states would land on
+          // `undefined`, which the useFrame loop reads as 0 (snap-follow) —
+          // i.e. the exact teleport-while-walking bug v28 fixes. Force the
+          // new default in so the fix is live on first load post-upgrade.
+          ...(fromVersion < 28 && {
+            sparkleFollowSmoothing: DEFAULT_WIZARD_TUNING.sparkleFollowSmoothing,
+          }),
+          // v29: smoothing is no longer the fix for teleport-while-walking
+          // (the fall-dyno counter-drift in SparkleScene is). v28 had set
+          // the default to 0.6 s as a workaround; reset to 0 (snap) so the
+          // particles read as world-space immediately. Users who deliberately
+          // dialled smoothing > 0 will see it reset — they can re-set it via
+          // the GUI if they liked the trailing feel.
+          ...(fromVersion < 29 && {
+            sparkleFollowSmoothing: DEFAULT_WIZARD_TUNING.sparkleFollowSmoothing,
+          }),
         }
       },
       partialize: (s) => {
@@ -433,6 +705,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
           setTuning: _set,
           resetTuning: _reset,
           applySplatPerfPreset: _preset,
+          applySparklePreset: _sparkle,
           bumpResetToken: _bump,
           ...rest
         } = s

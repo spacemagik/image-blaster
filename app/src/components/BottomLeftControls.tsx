@@ -5,6 +5,7 @@ import {
   ParkIcon,
   MountainsIcon,
   CubeIcon,
+  PlayIcon,
 } from '@phosphor-icons/react'
 import { Tooltip } from '@radix-ui/themes'
 import { type ReactElement, useEffect } from 'react'
@@ -80,6 +81,7 @@ export function BottomLeftControls() {
   const setObjectRenderMode = useDebugStore((s) => s.setObjectRenderMode)
   const worldRenderMode = useDebugStore((s) => s.worldRenderMode)
   const setWorldRenderMode = useDebugStore((s) => s.setWorldRenderMode)
+  const setPlayMode = useDebugStore((s) => s.setPlayMode)
 
   const modeBtn = (active: boolean) =>
     `w-8 h-8 justify-center rounded ${
@@ -114,6 +116,21 @@ export function BottomLeftControls() {
             </AppButton>
           </ControlTooltip>
         ))}
+      </div>
+
+      {/* Play mode — hides every overlay (sidebar, lil-gui, this control bar
+          itself) so the canvas reads as a clean game view. Esc / backtick
+          both exit; an "Exit play mode" pill in the top-right is the
+          discoverable way back. */}
+      <div className={`${chrome.bar} flex h-10 items-center gap-1`}>
+        <ControlTooltip content="Play mode (`)">
+          <AppButton
+            onClick={() => setPlayMode(true)}
+            className="w-8 h-8 justify-center rounded text-white"
+          >
+            <PlayIcon size={17} weight="fill" />
+          </AppButton>
+        </ControlTooltip>
       </div>
     </div>
   )

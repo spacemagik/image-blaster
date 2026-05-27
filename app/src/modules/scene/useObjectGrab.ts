@@ -293,7 +293,15 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
       if (!target) return false
 
       event.stopPropagation()
-      event.nativeEvent.preventDefault()
+      // No preventDefault: React 18 delegates pointerdown through a passive
+      // root listener, so preventDefault is a no-op there and just logs a
+      // warning. stopPropagation still works on passive listeners and is
+      // what mattered for grab semantics anyway (it stops the event reaching
+      // sibling 3D objects). If we ever genuinely need to block a browser
+      // default (text selection, touch-scroll, etc.) on this element, add
+      // CSS `touch-action: none` / `user-select: none` to the canvas, or
+      // attach a native non-passive listener directly to the canvas DOM —
+      // don't bring back this preventDefault call.
       markObjectInteraction()
       target.handle.playInteractionSfx()
       beginGrab(target.objectId, target.handle, event.pointerId, event.clientX, event.clientY, target.point)

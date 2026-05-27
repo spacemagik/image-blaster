@@ -3,6 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Inline transparent favicon: the browser auto-requests /favicon.ico on
+         every page load and 404s noisily without it. An empty 1×1 data URI
+         is the cheapest way to short-circuit that request — no extra asset
+         to maintain, no network round-trip. Swap to a real icon later by
+         dropping a file in app/public/ and pointing href= at it. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3C/svg%3E" />
     <title>image-blaster</title>
   </head>
   <body>

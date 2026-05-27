@@ -31,6 +31,12 @@ import * as THREE from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import { isEditableTarget } from '../../utils/dom'
 import { useWizardTuning } from './wizardTuning'
+// `wizardFeetPos` lives in its own data-only module so React Fast Refresh can
+// HMR this component without invalidating every consumer (Sparkle, Lighting,
+// etc.). Do NOT re-export it from here — mixing a non-component export into a
+// component file brings back vite-plugin-react's "incompatible export" warning
+// and the cascading invalidations that come with it.
+import { wizardFeetPos } from './wizardState'
 
 const WIZARD_URL = '/silo.glb'
 
@@ -72,13 +78,6 @@ interface CharacterPhysicsState {
   grounded: boolean
   allowSliding: boolean
 }
-
-/**
- * Live wizard feet world-position. Updated each frame by WizardController so other
- * Wizard-mode subsystems (e.g. WizardLighting / sun-follow) can read it cheaply
- * without going through Rapier or React state. Initialized to the spawn point.
- */
-export const wizardFeetPos = new THREE.Vector3()
 
 const _move = new THREE.Vector3()
 const _verticalVel = new THREE.Vector3()
@@ -456,7 +455,16 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       })
       state.grounded = controller.computedGrounded()
       if (dt > 1e-8) {
-        state.linearVelocity.set(movement.x / dt, movement.y / dt, movement.z / dt)
+        // X/Z come from actual movement so swept-collision side-slides feel
+        // physical. Y intentionally uses the *planned* velocity (`_newVel.y`,
+        // which is gravity + jump impulse only) instead of the snap-inflated
+        // actual y. Rapier's snap-to-ground can move the character down by
+        // several meters in a single frame (≈ -60 m/s to -180 m/s at 60 fps),
+        // and if `grounded` then flips false for one frame, that velocity
+        // gets reused as `_verticalVel` next tick, plus more gravity, and
+        // the character rockets through the floor. Sprint surfaces this fast
+        // because 17.5 m/s horizontal crosses more triangle edges per frame.
+        state.linearVelocity.set(movement.x / dt, _newVel.y, movement.z / dt)
       }
 
       // ── 4. Animation stability + horizontal-speed smoothing ──────────────────

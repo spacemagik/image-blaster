@@ -26,7 +26,10 @@ import {
   type SplatPerfPreset,
   type WizardTuning,
 } from './wizardTuning'
+import { SPARKLE_PRESETS, type SparklePreset } from '../splat/sparkle'
 import { useDebugStore } from '../../store/debug'
+
+const SPARKLE_PRESET_NAMES = Object.keys(SPARKLE_PRESETS) as SparklePreset[]
 
 const SHADOW_MAP_TYPES: ShadowMapType[] = [
   'BasicShadowMap',
@@ -211,6 +214,111 @@ export function WizardGui() {
       }
     })
 
+    // ── Sparkles (Spark 2.1 particle FX) ─────────────────────────────────────
+    // Mirror the inline sparkle.js demo's controls inside the existing lil-gui.
+    // Preset picker re-seeds every per-field knob below; switching presets
+    // updates the visible sliders to that preset's defaults so users can
+    // tweak from there. Position / opacity edits hot-update; everything else
+    // triggers a Sparkle.removeEffect + addEffect in SparkleScene.
+    const sparkleFolder = gui.addFolder('Sparkles')
+    const sparkleControls: Array<{ updateDisplay: () => void }> = []
+    sparkleControls.push(
+      sparkleFolder.add(tAny, 'sparkleEnabled').name('Enable').onChange(push('sparkleEnabled')),
+    )
+    const refreshSparkleDisplay = () => sparkleControls.forEach((c) => c.updateDisplay())
+    sparkleControls.push(
+      sparkleFolder
+        .add(tAny, 'sparklePreset', SPARKLE_PRESET_NAMES)
+        .name('Preset')
+        .onChange((value: SparklePreset) => {
+          useWizardTuning.getState().applySparklePreset(value)
+          // Local snapshot stays in sync so the freshly-seeded preset values
+          // show up in the sliders below without a manual refresh click.
+          Object.assign(tAny, useWizardTuning.getState())
+          refreshSparkleDisplay()
+        }),
+    )
+    const posFolder = sparkleFolder.addFolder('Position')
+    sparkleControls.push(
+      // Follow toggle: when on, X/Y/Z are offsets from the character's feet
+      // (the slab rides with the player). When off, they're absolute world
+      // coords (the slab stays put). The slider labels intentionally stay
+      // "X / Y / Z" in both modes — the meaning is documented in the folder
+      // name (kept as "Position") and via the Follow toggle next to it.
+      posFolder.add(tAny, 'sparkleFollowCharacter').name('Follow character').onChange(push('sparkleFollowCharacter')),
+      // Exponential lag in seconds. 0 = snap (was previous default — looks
+      // like an obvious teleport when walking because all particles
+      // translate by the same step distance each frame). 0.6 s is the
+      // default and feels like ambient mist that slowly catches up to the
+      // player. >1.5 s starts to look like the particles are stuck to the
+      // ground (slab takes longer to recenter than the player takes to walk
+      // through it). Capped at 3 s to keep the slider useful.
+      posFolder.add(tAny, 'sparkleFollowSmoothing', 0, 3, 0.05).name('Follow lag (s)').onChange(push('sparkleFollowSmoothing')),
+      posFolder.add(tAny, 'sparklePosX', -50, 50, 0.1).name('X (offset)').onChange(push('sparklePosX')),
+      posFolder.add(tAny, 'sparklePosY', -20, 30, 0.1).name('Y (offset)').onChange(push('sparklePosY')),
+      posFolder.add(tAny, 'sparklePosZ', -50, 50, 0.1).name('Z (offset)').onChange(push('sparklePosZ')),
+    )
+    const sizeFolder = sparkleFolder.addFolder('Size')
+    sparkleControls.push(
+      // No min/max passed → lil-gui renders a plain number input (no slider
+      // cap). User can type any value, drag the field, or use the stepper.
+      // `Radius` is the X/Z half-extent (wide-the-plane); `Height` is the
+      // Y half-extent (thin-the-slab). A wide radius + small height gives a
+      // plane / curtain spawn; equal values give a cube.
+      sizeFolder.add(tAny, 'sparkleRadius').step(0.1).name('Radius (XZ)').onChange(push('sparkleRadius')),
+      sizeFolder.add(tAny, 'sparkleHeight').step(0.1).name('Height (Y)').onChange(push('sparkleHeight')),
+      sizeFolder.add(tAny, 'sparkleMinScale', 0.0005, 0.05, 0.0005).name('Min particle size').onChange(push('sparkleMinScale')),
+      sizeFolder.add(tAny, 'sparkleMaxScale', 0.001, 0.1, 0.001).name('Max particle size').onChange(push('sparkleMaxScale')),
+    )
+    const lookFolder = sparkleFolder.addFolder('Look')
+    sparkleControls.push(
+      lookFolder.add(tAny, 'sparkleDensity', 1, 600, 1).name('Density').onChange(push('sparkleDensity')),
+      // Hard cap on particle count. Density × volume can hit millions on
+      // a wide slab; this is the brake. 8000 covers most "forest mist"
+      // looks; bump to 20k+ for very dense effects, but expect FPS hit.
+      lookFolder.add(tAny, 'sparkleMaxSplats', 100, 200000, 100).name('Max splats').onChange(push('sparkleMaxSplats')),
+      lookFolder.add(tAny, 'sparkleOpacity', 0, 1, 0.01).name('Opacity').onChange(push('sparkleOpacity')),
+      lookFolder.addColor(tAny, 'sparkleColor1').name('Color 1').onChange(push('sparkleColor1')),
+      lookFolder.addColor(tAny, 'sparkleColor2').name('Color 2').onChange(push('sparkleColor2')),
+    )
+    const motionFolder = sparkleFolder.addFolder('Motion')
+    sparkleControls.push(
+      motionFolder.add(tAny, 'sparkleFallVelocity', 0, 0.2, 0.001).name('Velocity').onChange(push('sparkleFallVelocity')),
+      motionFolder.add(tAny, 'sparkleWanderScale', 0, 0.1, 0.001).name('Wander amp').onChange(push('sparkleWanderScale')),
+      motionFolder.add(tAny, 'sparkleWanderVariance', 0, 10, 1).name('Wander freq').onChange(push('sparkleWanderVariance')),
+      motionFolder.add(tAny, 'sparkleFallDirX', -1, 1, 0.05).name('Dir X').onChange(push('sparkleFallDirX')),
+      motionFolder.add(tAny, 'sparkleFallDirY', -1, 1, 0.05).name('Dir Y').onChange(push('sparkleFallDirY')),
+      motionFolder.add(tAny, 'sparkleFallDirZ', -1, 1, 0.05).name('Dir Z').onChange(push('sparkleFallDirZ')),
+    )
+    const gizmoFolder = sparkleFolder.addFolder('Gizmo + helpers')
+    sparkleControls.push(
+      gizmoFolder.add(tAny, 'sparkleShowBox').name('Show spawn box').onChange(push('sparkleShowBox')),
+      gizmoFolder.add(tAny, 'sparkleGizmoEnabled').name('3D gizmo').onChange(push('sparkleGizmoEnabled')),
+      gizmoFolder.add(tAny, 'sparkleGizmoMode', ['translate', 'rotate', 'scale']).name('Gizmo mode').onChange(push('sparkleGizmoMode')),
+    )
+    tracked.push(...sparkleControls)
+    // Keep the snapshot+display in sync when the store changes externally
+    // (e.g. Reset button, preset action). Without this, lil-gui sliders would
+    // show stale values until a manual `updateDisplay`.
+    const unsubSparkle = useWizardTuning.subscribe((s, prev) => {
+      const keys: Array<keyof WizardTuning> = [
+        'sparkleEnabled', 'sparklePreset',
+        'sparklePosX', 'sparklePosY', 'sparklePosZ',
+        'sparkleRadius', 'sparkleHeight',
+        'sparkleDensity', 'sparkleMaxSplats', 'sparkleOpacity',
+        'sparkleMinScale', 'sparkleMaxScale',
+        'sparkleColor1', 'sparkleColor2',
+        'sparkleFallVelocity', 'sparkleWanderScale', 'sparkleWanderVariance',
+        'sparkleFallDirX', 'sparkleFallDirY', 'sparkleFallDirZ',
+        'sparkleGizmoEnabled', 'sparkleGizmoMode', 'sparkleShowBox',
+        'sparkleFollowCharacter', 'sparkleFollowSmoothing',
+      ]
+      if (keys.some((k) => s[k] !== prev[k])) {
+        for (const k of keys) tAny[k] = s[k]
+        refreshSparkleDisplay()
+      }
+    })
+
     // ── Character model ──────────────────────────────────────────────────────
     const dogFolder = gui.addFolder('Character model')
     tracked.push(
@@ -378,6 +486,7 @@ export function WizardGui() {
     return () => {
       unsubSplatTuning()
       unsubSplatPerfTuning()
+      unsubSparkle()
       gui.destroy()
       guiRef.current = null
       // Suppress unused-tracked warning; refs kept to allow future updateDisplay() reset.

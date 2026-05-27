@@ -20,7 +20,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { useWizardTuning, type ShadowMapType } from './wizardTuning'
-import { wizardFeetPos } from './WizardController'
+import { wizardFeetPos } from './wizardState'
 
 const SHADOW_TYPE_MAP: Record<ShadowMapType, THREE.ShadowMapType> = {
   BasicShadowMap: THREE.BasicShadowMap,
