@@ -238,6 +238,80 @@ export interface WizardTuning {
    *  idle. Larger values look more like world-space fog; smaller values keep
    *  the slab tightly centred on the player. */
   sparkleFollowSmoothing: number
+
+  // ── Portal twist (Spark 2.1 worldModifier experiment) ──────────────────
+  // A spherical region of the world splat is rotated around an axis,
+  // smoothly falling off to zero by `portalRadius` so the boundary doesn't
+  // pop. `portalStrength` is radians of twist at the centre; `portalSpinRate`
+  // (rad/sec) adds continuous animation on top so the portal "swirls".
+  // Implemented as a Spark `SplatMesh.worldModifier` running per-splat in
+  // GLSL — see `splat/portalTwist.ts` for the dyno that consumes these.
+  portalEnabled: boolean
+  /** World-space centre of the twist sphere (NOT character-relative). */
+  portalPosX: number
+  portalPosY: number
+  portalPosZ: number
+  /** Falloff radius in metres. Twist is ~1× at the centre, ~37% at this
+   *  distance, ~2% at 2× this distance. */
+  portalRadius: number
+  /** Rotation axis (will be normalised in the shader). +Y = swirl around
+   *  vertical, +Z = horizontal vortex. */
+  portalAxisX: number
+  portalAxisY: number
+  portalAxisZ: number
+  /** Static twist amount at the portal centre (radians). π ≈ half-rotation. */
+  portalStrength: number
+  /** Continuous spin layered on top (radians/sec). 0 = static swirl. */
+  portalSpinRate: number
+  /** Spiral-arm density. Radians of EXTRA twist per (radial / radius) =
+   *  the angle splats at the rim get rotated by ON TOP of `portalStrength`.
+   *  `2π` ≈ one full spiral arm; `4π` ≈ two arms; 0 disables arms entirely
+   *  and you get the bulk-twist look. Combined with `portalSpinRate`, the
+   *  arms rotate around the axis over time → portal swirl. */
+  portalWindings: number
+  /** Euler rotation of the portal SPZ (degrees, applied to the proxy group
+   *  that wraps the portal SplatMesh). Drives the same proxy the TransformControls
+   *  writes into, so rotating with the gizmo flows back through here. */
+  portalRotationDegX: number
+  portalRotationDegY: number
+  portalRotationDegZ: number
+  /** Uniform scale of the portal SPZ. Single value because non-uniform
+   *  splat scaling distorts the Gaussian kernels in ways that look wrong;
+   *  uniform scale is well-defined. */
+  portalScale: number
+  /** In-canvas TransformControls gizmo for posing the portal. The same
+   *  gizmo handles all three modes — flip `portalGizmoMode` to switch. */
+  portalGizmoEnabled: boolean
+  /** Which transform handle the gizmo exposes: translate / rotate / scale.
+   *  Mirrors the world splat's `splatGizmoMode` pattern. */
+  portalGizmoMode: 'translate' | 'rotate' | 'scale'
+  /** Show a translucent sphere helper at the portal so it's easy to find
+   *  when the twist effect itself is subtle (low strength, off-camera). */
+  portalShowSphere: boolean
+
+  // ── Splat colour modulation (turns the twisted splats into a glowing
+  // cyan vortex — the "magical portal" look). Independent of the disk
+  // overlay below; this is applied IN the worldModifier so the splats
+  // themselves take on the colour. ───────────────────────────────────────
+  /** Master toggle for the recolour pass inside the portal region. */
+  portalTintEnabled: boolean
+  /** Tint colour that splats blend toward as they approach the centre. */
+  portalTintColor: ColorRGB
+  /** 0..5+ extra brightness multiplier at the spiral-arm crests. Push
+   *  above 1 to drive the bloom post-processing. */
+  portalTintEmission: number
+  /** Number of distinct angular arm streams visible (1–12). */
+  portalTintArms: number
+  /** Log-spiral tightness for the colour arms (1–30 — higher wraps
+   *  the bands more tightly into the centre). */
+  portalTintWindings: number
+  /** 1–5 — arm crest sharpness. Higher = each arm reads as a discrete
+   *  stream instead of a smooth gradient. */
+  portalTintContrast: number
+  /** 0..1 — how dark the absolute centre of the portal gets (the
+   *  "tunnel mouth" look from most portal art). */
+  portalTintCoreDarkness: number
+
 }
 
 export type SplatPerfPreset = 'performance' | 'balanced' | 'quality'
@@ -504,6 +578,51 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   sparkleGizmoEnabled: false,
   sparkleGizmoMode: 'translate',
   sparkleShowBox: false,
+  // Cosmic swirl — defaults baked from the hand-tuned "cosmic" pose the
+  // user landed on after iterating on placement and scale in-canvas.
+  // Position drops the SPZ at the back-left of the fantasy2 world (around
+  // (-27, 4, -83)) where it sits naturally against the existing scenery
+  // rather than overlapping the wizard's spawn. Scale ~8.46 sizes the
+  // portal so it reads as a landmark vortex rather than a desktop trinket.
+  // Slight X tilt (~9°) gives the swirl axis a subtle lean so the spiral
+  // arms aren't perfectly horizontal — looks more "energetic". The swirl
+  // effect itself stays disabled by default so first-load is calm; user
+  // flips `Enable swirl` to start the animation.
+  portalEnabled: false,
+  portalPosX: -26.650,
+  portalPosY: 3.67319,
+  portalPosZ: -83.276,
+  portalRadius: 5,
+  portalAxisX: 0,
+  portalAxisY: 1,
+  portalAxisZ: 0,
+  portalStrength: Math.PI,
+  portalSpinRate: 1,
+  // 4π = 2 visible spiral arms at the rim, which is the canonical
+  // portal-vortex silhouette. With portalSpinRate = 1 rad/s the whole
+  // pattern rotates roughly once every 6 s, which reads obviously as
+  // a rotating spiral without being dizzying.
+  portalWindings: Math.PI * 4,
+  portalRotationDegX: 9.02233,
+  portalRotationDegY: 0,
+  portalRotationDegZ: 0,
+  portalScale: 8.45987,
+  portalGizmoEnabled: false,
+  portalGizmoMode: 'translate',
+  portalShowSphere: true,
+
+  // Splat tint — defaults give the same cyan-vortex look but applied
+  // directly to the swirled splats themselves. On by default so that
+  // when the user enables `portalEnabled`, the splats inside the sphere
+  // immediately read as a glowing portal instead of just bent forest.
+  portalTintEnabled: true,
+  portalTintColor: [0.35, 0.85, 1.0],
+  portalTintEmission: 1.5,
+  portalTintArms: 3,
+  portalTintWindings: 8,
+  portalTintContrast: 2,
+  portalTintCoreDarkness: 0.55,
+
   sparkleFollowCharacter: true,
   // Defaults to 0 (snap-follow): the spawn box tracks the player tightly,
   // and SparkleScene's per-frame counter-drift cancels that translation in
@@ -577,14 +696,14 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // Smoothing default reverts to 0 since it's no longer needed as a
       // workaround (still exposed for users who want a deliberate "fog"
       // trailing feel).
-      version: 29,
+      version: 38,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
         // Always force the v21 anti-fly-mode tuning regardless of what
         // upgrade path the user came from — we want the new defaults to win
         // even if they had stale per-field values from v20 already.
-        return {
+        const migrated: Record<string, unknown> = {
           ...persistedState,
           stickToFloorDistance: DEFAULT_WIZARD_TUNING.stickToFloorDistance,
           maxSlopeClimbDeg: DEFAULT_WIZARD_TUNING.maxSlopeClimbDeg,
@@ -688,16 +807,139 @@ export const useWizardTuning = create<WizardTuningStore>()(
           ...(fromVersion < 28 && {
             sparkleFollowSmoothing: DEFAULT_WIZARD_TUNING.sparkleFollowSmoothing,
           }),
-          // v29: smoothing is no longer the fix for teleport-while-walking
-          // (the fall-dyno counter-drift in SparkleScene is). v28 had set
-          // the default to 0.6 s as a workaround; reset to 0 (snap) so the
-          // particles read as world-space immediately. Users who deliberately
-          // dialled smoothing > 0 will see it reset — they can re-set it via
-          // the GUI if they liked the trailing feel.
-          ...(fromVersion < 29 && {
-            sparkleFollowSmoothing: DEFAULT_WIZARD_TUNING.sparkleFollowSmoothing,
-          }),
+      // v29: smoothing is no longer the fix for teleport-while-walking
+      // (the fall-dyno counter-drift in SparkleScene is). v28 had set
+      // the default to 0.6 s as a workaround; reset to 0 (snap) so the
+      // particles read as world-space immediately. Users who deliberately
+      // dialled smoothing > 0 will see it reset — they can re-set it via
+      // the GUI if they liked the trailing feel.
+      ...(fromVersion < 29 && {
+        sparkleFollowSmoothing: DEFAULT_WIZARD_TUNING.sparkleFollowSmoothing,
+      }),
+      // v30: introduces the portal-twist experiment. Older persisted
+      // states lack every `portal*` field; pull them in from defaults so
+      // PortalScene doesn't see `undefined` and skip uniform writes. The
+      // portal is `portalEnabled: false` by default, so existing users
+      // see exactly the same scene on upgrade — they have to opt in via
+      // the GUI to make the splats swirl.
+      ...(fromVersion < 30 && {
+        portalEnabled: DEFAULT_WIZARD_TUNING.portalEnabled,
+        portalPosX: DEFAULT_WIZARD_TUNING.portalPosX,
+        portalPosY: DEFAULT_WIZARD_TUNING.portalPosY,
+        portalPosZ: DEFAULT_WIZARD_TUNING.portalPosZ,
+        portalRadius: DEFAULT_WIZARD_TUNING.portalRadius,
+        portalAxisX: DEFAULT_WIZARD_TUNING.portalAxisX,
+        portalAxisY: DEFAULT_WIZARD_TUNING.portalAxisY,
+        portalAxisZ: DEFAULT_WIZARD_TUNING.portalAxisZ,
+        portalStrength: DEFAULT_WIZARD_TUNING.portalStrength,
+        portalSpinRate: DEFAULT_WIZARD_TUNING.portalSpinRate,
+        portalGizmoEnabled: DEFAULT_WIZARD_TUNING.portalGizmoEnabled,
+        portalShowSphere: DEFAULT_WIZARD_TUNING.portalShowSphere,
+      }),
+      // v31: introduces `portalWindings` so the twist reads as a rotating
+      // spiral (visible arms) instead of a uniformly tumbled blob. Older
+      // states would land on undefined → 0 (no arms), so seed the default
+      // so anyone re-enabling the portal sees the spiral immediately.
+      ...(fromVersion < 31 && {
+        portalWindings: DEFAULT_WIZARD_TUNING.portalWindings,
+      }),
+      // v32: previously seeded a procedural glowing-disk overlay portal
+      // visual (`portalDisk*` fields). Removed in v34 — the disk was made
+      // redundant by the in-splat tint pass added in v33 (the splats
+      // themselves now read as the glowing portal). No-op here so the
+      // version number stays monotonic.
+      // v33: splat-tint pass — the twist modifier now also recolours the
+      // splats inside the sphere so they read as a glowing cyan vortex
+      // (matching the user's reference) instead of just bent forest.
+      // Without these defaults the dyno uniforms would receive undefined
+      // and Spark would either skip the pass or sample garbage colours.
+      // tintEnabled defaults to true so the moment a user toggles
+      // `portalEnabled` they see the magical-portal look immediately.
+      ...(fromVersion < 33 && {
+        portalTintEnabled: DEFAULT_WIZARD_TUNING.portalTintEnabled,
+        portalTintColor: DEFAULT_WIZARD_TUNING.portalTintColor,
+        portalTintEmission: DEFAULT_WIZARD_TUNING.portalTintEmission,
+        portalTintArms: DEFAULT_WIZARD_TUNING.portalTintArms,
+        portalTintWindings: DEFAULT_WIZARD_TUNING.portalTintWindings,
+        portalTintContrast: DEFAULT_WIZARD_TUNING.portalTintContrast,
+        portalTintCoreDarkness: DEFAULT_WIZARD_TUNING.portalTintCoreDarkness,
+      }),
+      // v34: drop the now-removed `portalDisk*` keys. Users on v32/v33
+      // have them in localStorage; if we leave the keys hanging around
+      // they bloat the persisted JSON forever and confuse future
+      // diff-based debugging. Deletion below uses `Reflect.deleteProperty`
+      // because TypeScript's `delete` operator doesn't play nicely with
+      // a typed spread.
         }
+        // v35 cleanup: the procedural glowing-disk visual was removed in
+        // favour of the in-splat tint pass (v33) — the splats themselves
+        // are now the portal visual, so the overlay disk became redundant.
+        // Older persisted states still have the `portalDisk*` keys floating
+        // around; strip them so the JSON stays clean and nothing else can
+        // accidentally read a stale toggle. Done as an explicit delete pass
+        // rather than a spread-omit because the latter requires knowing the
+        // full type up front.
+        // (Bumped to v35 because v34 was briefly published with the cleanup
+        // gated on `fromVersion < 34` — anyone who hydrated against that
+        // pre-cleanup version 34 still has the keys lingering, hence the
+        // re-run at v35.)
+        if (fromVersion < 35) {
+          for (const k of [
+            'portalShowDisk',
+            'portalDiskColor',
+            'portalDiskScale',
+            'portalDiskOpacity',
+            'portalDiskArms',
+            'portalDiskWindings',
+            'portalDiskSpeed',
+            'portalDiskCoreDarkness',
+            'portalDiskContrast',
+            'portalDiskFaceCamera',
+          ]) Reflect.deleteProperty(migrated, k)
+        }
+        // v36: portal SPZ now spawns AT the character's spawn position
+        // (Y = spawnFeetY) instead of an arbitrary 2 m. Older states have
+        // `portalPosY: 2` baked in from the v30 seed; overwrite them with
+        // the new default so the portal lands at the wizard's feet on
+        // next load. We reset all three axes (XZ were already 0, so this
+        // is effectively a Y-only change) to keep the migration intent
+        // obvious and self-documenting.
+        if (fromVersion < 36) {
+          migrated.portalPosX = DEFAULT_WIZARD_TUNING.portalPosX
+          migrated.portalPosY = DEFAULT_WIZARD_TUNING.portalPosY
+          migrated.portalPosZ = DEFAULT_WIZARD_TUNING.portalPosZ
+        }
+        // v37: portal gizmo upgraded from translate-only to the full
+        // translate/rotate/scale picker (matches the world splat). Seed
+        // the new rotation/scale/mode fields so older states don't end
+        // up with `undefined` flowing into proxy.rotation / proxy.scale
+        // (which would silently render the portal at scale 0).
+        if (fromVersion < 37) {
+          migrated.portalRotationDegX = DEFAULT_WIZARD_TUNING.portalRotationDegX
+          migrated.portalRotationDegY = DEFAULT_WIZARD_TUNING.portalRotationDegY
+          migrated.portalRotationDegZ = DEFAULT_WIZARD_TUNING.portalRotationDegZ
+          migrated.portalScale = DEFAULT_WIZARD_TUNING.portalScale
+          migrated.portalGizmoMode = DEFAULT_WIZARD_TUNING.portalGizmoMode
+        }
+        // v38: bake the user's hand-tuned "cosmic" placement into the
+        // defaults (position ≈ (-27, 4, -83), uniform scale ≈ 8.46, slight
+        // X-axis tilt). Force-overwrite the matching portal* keys here so
+        // any persisted state from v36/v37 (which still has the
+        // wizard-spawn defaults of (0, 4, 0) + scale 1) snaps to the new
+        // canonical cosmic pose on next load. The fields we re-seed are
+        // exactly the ones the new DEFAULT_WIZARD_TUNING moved — radius,
+        // strength, spin, axis, and windings already matched the previous
+        // defaults so they don't need a reset.
+        if (fromVersion < 38) {
+          migrated.portalPosX = DEFAULT_WIZARD_TUNING.portalPosX
+          migrated.portalPosY = DEFAULT_WIZARD_TUNING.portalPosY
+          migrated.portalPosZ = DEFAULT_WIZARD_TUNING.portalPosZ
+          migrated.portalRotationDegX = DEFAULT_WIZARD_TUNING.portalRotationDegX
+          migrated.portalRotationDegY = DEFAULT_WIZARD_TUNING.portalRotationDegY
+          migrated.portalRotationDegZ = DEFAULT_WIZARD_TUNING.portalRotationDegZ
+          migrated.portalScale = DEFAULT_WIZARD_TUNING.portalScale
+        }
+        return migrated
       },
       partialize: (s) => {
         const {

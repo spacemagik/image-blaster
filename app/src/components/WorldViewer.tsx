@@ -14,6 +14,7 @@ import { useWizardTuning } from '../modules/character/wizardTuning'
 import { ButterflyScene } from '../modules/butterfly/ButterflyScene'
 import { ObjectGrid } from '../modules/scene/ObjectGrid'
 import { SparkleScene } from '../modules/sparkle/SparkleScene'
+import { PortalScene } from '../modules/portal/PortalScene'
 import { PlacementEditorOverlay, PlacementEditorScene, usePlacementEditor } from '../modules/scene/PlacementEditor'
 import { OriginHelper } from '../modules/scene/OriginHelper'
 import { AudioManager } from '../modules/audio/AudioManager'
@@ -348,6 +349,7 @@ export function WorldViewer({
           {!panoUrl && <DefaultEnvironment intensity={activeEnvironmentIntensity} />}
           {butterfliesEnabled && <ButterflyScene />}
           <SparkleScene />
+          <PortalScene />
           <OriginHelper />
           {isHighQuality && <PostProcessing />}
         </Suspense>

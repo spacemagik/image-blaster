@@ -28,6 +28,7 @@ import {
 } from './wizardTuning'
 import { SPARKLE_PRESETS, type SparklePreset } from '../splat/sparkle'
 import { useDebugStore } from '../../store/debug'
+import { wizardFeetPos } from './wizardState'
 
 const SPARKLE_PRESET_NAMES = Object.keys(SPARKLE_PRESETS) as SparklePreset[]
 
@@ -319,6 +320,140 @@ export function WizardGui() {
       }
     })
 
+    // ── Cosmic swirl ─────────────────────────────────────────────────────────
+    // Loads `/portal.spz` as a standalone SplatMesh and drives a Spark 2.1
+    // `worldModifier` that twists / tints ONLY that mesh (the surrounding
+    // world is untouched). The folder name was once "Portal twist" — kept
+    // the store keys (`portal*`) under that prefix so existing persisted
+    // localStorage state still hydrates without migration churn, but the
+    // user-facing name is now "Cosmic swirl" since that better describes
+    // what the SPZ actually looks like on screen.
+    //
+    // Gizmo: one TransformControls handle attached to the portal SPZ;
+    // `Gizmo mode` cycles it between translate / rotate / scale. All three
+    // mirror straight into the persisted store on every drag — see
+    // `handleGizmoChange` in PortalScene.
+    const portalFolder = gui.addFolder('Cosmic swirl')
+    const portalControls: Array<{ updateDisplay: () => void }> = []
+    const refreshPortalDisplay = () => portalControls.forEach((c) => c.updateDisplay())
+    portalControls.push(
+      portalFolder.add(tAny, 'portalEnabled').name('Enable swirl').onChange(push('portalEnabled')),
+      portalFolder.add(tAny, 'portalShowSphere').name('Show region sphere').onChange(push('portalShowSphere')),
+      portalFolder.add(tAny, 'portalGizmoEnabled').name('3D gizmo (visual)').onChange(push('portalGizmoEnabled')),
+      // Mode picker mirrors the world splat's `splatGizmoMode` UX so
+      // translate/rotate/scale all share one handle in the canvas — no
+      // need to keep three separate gizmos mounted at once.
+      portalFolder.add(tAny, 'portalGizmoMode', ['translate', 'rotate', 'scale'])
+        .name('Gizmo mode').onChange(push('portalGizmoMode')),
+    )
+    const portalPosFolder = portalFolder.addFolder('Position (world)')
+    portalControls.push(
+      portalPosFolder.add(tAny, 'portalPosX', -200, 200, 0.1).name('X').onChange(push('portalPosX')),
+      portalPosFolder.add(tAny, 'portalPosY', -50, 100, 0.1).name('Y').onChange(push('portalPosY')),
+      portalPosFolder.add(tAny, 'portalPosZ', -200, 200, 0.1).name('Z').onChange(push('portalPosZ')),
+    )
+    // Rotation: degrees so users have intuitive numbers to type. The
+    // PortalScene converts to radians at apply time. ±360 range so a user
+    // can scrub past a full revolution without the slider clamping.
+    const portalRotFolder = portalFolder.addFolder('Rotation (deg)')
+    portalControls.push(
+      portalRotFolder.add(tAny, 'portalRotationDegX', -360, 360, 0.5).name('X').onChange(push('portalRotationDegX')),
+      portalRotFolder.add(tAny, 'portalRotationDegY', -360, 360, 0.5).name('Y').onChange(push('portalRotationDegY')),
+      portalRotFolder.add(tAny, 'portalRotationDegZ', -360, 360, 0.5).name('Z').onChange(push('portalRotationDegZ')),
+    )
+    // Uniform scale only — see store doc on `portalScale` for why we
+    // don't expose per-axis splat scaling here.
+    const portalScaleFolder = portalFolder.addFolder('Scale')
+    portalControls.push(
+      portalScaleFolder.add(tAny, 'portalScale', 0.05, 20, 0.05).name('Uniform').onChange(push('portalScale')),
+    )
+    const portalShapeFolder = portalFolder.addFolder('Shape + spin')
+    portalControls.push(
+      // No min/max on radius so users can scale up to a "warp the whole
+      // world" stress test; sane scrub step keeps the slider usable.
+      portalShapeFolder.add(tAny, 'portalRadius').step(0.1).name('Radius (m)').onChange(push('portalRadius')),
+      // Strength in radians. Half-rotation (π) is the most legibly "portal"
+      // look; 2π wraps once, 4π+ starts looking like a candy-cane stripe
+      // because nearby splats wind multiple times around each other.
+      portalShapeFolder.add(tAny, 'portalStrength', -6.28, 6.28, 0.01).name('Twist (rad)').onChange(push('portalStrength')),
+      // Spiral arms — extra rotation per unit of radial distance. THIS is
+      // what turns a "smooth twist" into a "portal spiral". 2π = 1 arm,
+      // 4π (default) = 2 arms, 6π = 3 arms, etc. Combined with `Spin` the
+      // whole arm pattern rotates around the axis.
+      portalShapeFolder.add(tAny, 'portalWindings', 0, 25, 0.05).name('Windings (arms)').onChange(push('portalWindings')),
+      // Spin rate adds continuous animation. 1 rad/s ≈ one revolution every
+      // 6.3 s at the centre. Negative values reverse the swirl direction.
+      portalShapeFolder.add(tAny, 'portalSpinRate', -6.28, 6.28, 0.01).name('Spin (rad/s)').onChange(push('portalSpinRate')),
+    )
+    const portalAxisFolder = portalFolder.addFolder('Axis (will normalise)')
+    portalControls.push(
+      portalAxisFolder.add(tAny, 'portalAxisX', -1, 1, 0.01).name('X').onChange(push('portalAxisX')),
+      portalAxisFolder.add(tAny, 'portalAxisY', -1, 1, 0.01).name('Y (up = vortex)').onChange(push('portalAxisY')),
+      portalAxisFolder.add(tAny, 'portalAxisZ', -1, 1, 0.01).name('Z').onChange(push('portalAxisZ')),
+    )
+    // ── Splat tint — the recolour pass baked into the worldModifier itself.
+    // This is what makes the swirled splats actually LOOK like a cyan portal
+    // (glowing arms, dark core) instead of just bent forest. Pairs naturally
+    // with the geometry twist above: the falloff sphere is shared, so the
+    // colour boundary always matches the bend boundary.
+    const portalTintFolder = portalFolder.addFolder('Splat tint (in-portal)')
+    portalControls.push(
+      portalTintFolder.add(tAny, 'portalTintEnabled').name('Enable recolour').onChange(push('portalTintEnabled')),
+      portalTintFolder.addColor(tAny, 'portalTintColor').name('Tint colour').onChange(push('portalTintColor')),
+      // Emission > 1 starts triggering the bloom pass and gives the
+      // "glowing rim" look from the reference; 0 keeps it matte.
+      portalTintFolder.add(tAny, 'portalTintEmission', 0, 5, 0.05).name('Emission (×)').onChange(push('portalTintEmission')),
+      portalTintFolder.add(tAny, 'portalTintArms', 1, 12, 1).name('Arm count').onChange(push('portalTintArms')),
+      portalTintFolder.add(tAny, 'portalTintWindings', 1, 30, 0.1).name('Winding tightness').onChange(push('portalTintWindings')),
+      portalTintFolder.add(tAny, 'portalTintContrast', 1, 5, 0.05).name('Arm sharpness').onChange(push('portalTintContrast')),
+      portalTintFolder.add(tAny, 'portalTintCoreDarkness', 0, 1, 0.01).name('Core darkness').onChange(push('portalTintCoreDarkness')),
+    )
+
+    // ── Quick-action: drop the portal centre on the wizard's current feet
+    // position. Without this the user has to either drag the 3D gizmo
+    // hundreds of metres across empty world space or manually type X/Y/Z
+    // into three sliders — both are painful when iterating on tint/spin
+    // settings. The little floating object hack on the position folder
+    // gives `lil-gui` a callable function it can render as a button.
+    const snapAction = {
+      'Snap portal to character': () => {
+        // Place the centre at the wizard's chest height (≈ feet + 1.2 m) so
+        // the portal naturally wraps the upper torso rather than spawning
+        // half-buried in the floor — much easier to see the tint effect on
+        // first glance.
+        const fx = wizardFeetPos.x
+        const fy = wizardFeetPos.y + 1.2
+        const fz = wizardFeetPos.z
+        useWizardTuning.getState().setTuning({
+          portalPosX: fx,
+          portalPosY: fy,
+          portalPosZ: fz,
+        })
+      },
+    }
+    portalControls.push(
+      portalPosFolder.add(snapAction, 'Snap portal to character'),
+    )
+    tracked.push(...portalControls)
+    // Sync slider readouts when the gizmo / store writes them externally.
+    const unsubPortal = useWizardTuning.subscribe((s, prev) => {
+      const keys: Array<keyof WizardTuning> = [
+        'portalEnabled', 'portalShowSphere', 'portalGizmoEnabled', 'portalGizmoMode',
+        'portalPosX', 'portalPosY', 'portalPosZ',
+        'portalRotationDegX', 'portalRotationDegY', 'portalRotationDegZ',
+        'portalScale',
+        'portalRadius', 'portalStrength', 'portalWindings', 'portalSpinRate',
+        'portalAxisX', 'portalAxisY', 'portalAxisZ',
+        'portalTintEnabled', 'portalTintColor', 'portalTintEmission',
+        'portalTintArms', 'portalTintWindings', 'portalTintContrast',
+        'portalTintCoreDarkness',
+      ]
+      if (keys.some((k) => s[k] !== prev[k])) {
+        for (const k of keys) tAny[k] = s[k]
+        refreshPortalDisplay()
+      }
+    })
+
     // ── Character model ──────────────────────────────────────────────────────
     const dogFolder = gui.addFolder('Character model')
     tracked.push(
@@ -487,6 +622,7 @@ export function WizardGui() {
       unsubSplatTuning()
       unsubSplatPerfTuning()
       unsubSparkle()
+      unsubPortal()
       gui.destroy()
       guiRef.current = null
       // Suppress unused-tracked warning; refs kept to allow future updateDisplay() reset.
