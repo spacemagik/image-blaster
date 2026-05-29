@@ -6,6 +6,7 @@ import * as THREE from 'three'
 import { useDebugStore } from '../../store/debug'
 import { useWizardTuning } from '../character/wizardTuning'
 import { ViewerQuality } from '../../types/world'
+import { setActiveSplatMesh } from './splatMeshRegistry'
 
 // Patch Spark's default vertex shader to swap the linear thin-lens CoC formula
 // for a configurable curve: zero blur within `sharpRange` of the focal plane,
@@ -161,6 +162,59 @@ export function SplatRenderer({
       if (sparkRef.current) sparkRef.current.raycast = ignoreRaycast
     }, [])
 
+    // Publish the active world SplatMesh into the registry so downstream
+    // effects (PortalScene's twist worldModifier, future per-splat warps,
+    // etc.) can attach without piercing this component. We wait for the
+    // SplatMesh's `initialized` promise so the modifier-attach side never
+    // races the async load — `mesh.worldModifier = …` immediately calls
+    // `updateGenerator()` which compiles a dyno pipeline against the
+    // live splat source.
+    //
+    // LoD itself is built by Spark inside its loading pipeline (because
+    // we pass `lod: true` to the `SplatMesh` constructor). That streams
+    // the SPZ into a `GsplatArray`, runs Quick LoD, and produces the
+    // LoD `PackedSplats` — all before `mesh.initialized` resolves. By
+    // the time we get here, `packedSplats.lodSplats` is already populated
+    // and `SparkRenderer`'s pager will use it from the first rendered
+    // frame onward. (We used to call `mesh.createLodSplats()` here as a
+    // post-init step, which is the *re-create after edits* API; doing it
+    // that way forced Spark to re-parse all 21M splats a second time
+    // after load, adding many seconds of main-thread stall.)
+    useEffect(() => {
+      const mesh = splatRef.current
+      if (!mesh) return
+      let cancelled = false
+      const spark = sparkRef.current
+      console.log('[Spark] SplatRenderer mounted', {
+        url,
+        sparkRenderer: !!spark,
+        enableLodCtor: spark?.enableLod,
+        maxPagedSplats: initialMaxPagedSplats.current,
+      })
+      const t0 = performance.now()
+      mesh.initialized
+        .then(() => {
+          if (cancelled) return
+          const tInit = performance.now()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const packed: any = (mesh as any).packedSplats
+          console.log('[Spark] SplatMesh initialized (lod: true)', {
+            ms: Math.round(tInit - t0),
+            numSplats: packed?.numSplats,
+            lodSplatsLen: packed?.lodSplats?.numSplats ?? packed?.lodSplats?.length,
+            meshEnableLod: mesh.enableLod,
+          })
+          setActiveSplatMesh(mesh)
+        })
+        .catch((err: unknown) => {
+          console.warn('SplatRenderer: splat mesh failed to initialize', err)
+        })
+      return () => {
+        cancelled = true
+        setActiveSplatMesh(null)
+      }
+    }, [url])
+
     useEffect(() => {
       if (sparkRef.current) sparkRef.current.encodeLinear = encodeLinear
     }, [encodeLinear])
@@ -184,9 +238,14 @@ export function SplatRenderer({
     const splatArgs = useMemo(
       () => ({
         url,
-        // Tell SplatMesh to participate in Spark's LOD tree so the renderer can
-        // pick a subset of splats by importance + screen-space size. Must be set
-        // at construction; live LOD tuning still happens via SparkRenderer above.
+        // Spark 2.1 canonical LoD-on-load: `lod: true` tells the loader to
+        // decode the SPZ into a `GsplatArray`, run Quick LoD in a background
+        // WebWorker, and finish init with `packedSplats.lodSplats` already
+        // populated. The SparkRenderer pager (which has `enableLod: true`
+        // above) starts paging from frame 0. This is the streaming-pipelined
+        // path and is dramatically faster on huge SPZs than calling
+        // `createLodSplats()` post-init (which forces Spark to re-parse the
+        // whole mesh a second time after load).
         lod: true as const,
       }),
       [url],
