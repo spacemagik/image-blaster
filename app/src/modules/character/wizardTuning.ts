@@ -269,6 +269,31 @@ export interface WizardTuning {
    *  and you get the bulk-twist look. Combined with `portalSpinRate`, the
    *  arms rotate around the axis over time → portal swirl. */
   portalWindings: number
+  /** 0..1 axial-extent multiplier on the swirl falloff. Decouples the
+   *  influence region's thickness (along `portalAxis`) from its
+   *  diameter (perpendicular to axis):
+   *    - 1.0 → sphere (axial extent = radial extent). The original
+   *      Gaussian falloff. Good for warping 3D regions of a volumetric
+   *      splat scene.
+   *    - 0.2 → flat disk perpendicular to the axis. Splats more than
+   *      ~0.2 × radius along the axis are excluded from the swirl,
+   *      which keeps a 2D-spiral SPZ from ballooning into a 3D ball
+   *      when its splats get rotated.
+   *  Clamped to 1e-4 inside the shader so 0 doesn't divide-by-zero. */
+  portalAxialExtent: number
+  /** 0..1 multiplier on the GEOMETRIC twist only. The tint band
+   *  animation is unaffected.
+   *    - 1.0 → splats rotate (current behaviour; outer splats rotate
+   *      more than inner ones, so a stationary spiral SPZ visibly
+   *      shears as windings increase).
+   *    - 0.0 → splats stay in their authored positions, but the tint
+   *      pass still animates (`tintColor` bands sweep around the
+   *      axis at `spinRate`). Use this for splats that already encode
+   *      their own spiral pattern — you get the *appearance* of
+   *      rotation without distorting the SPZ.
+   *  Intermediate values give a partial geometric twist plus full
+   *  tint animation, which can be a nice middle ground. */
+  portalGeometryAmount: number
   /** Euler rotation of the portal SPZ (degrees, applied to the proxy group
    *  that wraps the portal SplatMesh). Drives the same proxy the TransformControls
    *  writes into, so rotating with the gizmo flows back through here. */
@@ -285,6 +310,27 @@ export interface WizardTuning {
   /** Which transform handle the gizmo exposes: translate / rotate / scale.
    *  Mirrors the world splat's `splatGizmoMode` pattern. */
   portalGizmoMode: 'translate' | 'rotate' | 'scale'
+  /** Which object the gizmo currently controls:
+   *  - 'splat'  → portalPos/Rot/Scale (visible SPZ)
+   *  - 'region' → portalRegionPos*    (swirl influence sphere centre)
+   *  Swapping target only changes which proxy the TransformControls is
+   *  attached to — both proxies stay mounted, so the sphere stays visible
+   *  while you drag the splat (and vice versa). The reason this is a
+   *  separate field from `portalGizmoMode` is so users can keep their
+   *  preferred handle (e.g. translate) when switching what they're
+   *  moving. */
+  portalGizmoTarget: 'splat' | 'region'
+  /** World-space centre of the swirl influence sphere. Decoupled from
+   *  `portalPos*` (which is the SPZ's proxy origin) because the cosmic
+   *  SPZ's visible geometry is offset from its object-space origin by
+   *  several metres — placing the region at the proxy gives a sphere
+   *  that misses every splat. Independent X/Y/Z so the user can drag
+   *  the sphere onto the actual visible vortex without disturbing the
+   *  splat's pose. Reads into the `portalCenter` dyno uniform each
+   *  frame, so the falloff sphere recentres live when these change. */
+  portalRegionPosX: number
+  portalRegionPosY: number
+  portalRegionPosZ: number
   /** Show a translucent sphere helper at the portal so it's easy to find
    *  when the twist effect itself is subtle (low strength, off-camera). */
   portalShowSphere: boolean
@@ -312,6 +358,69 @@ export interface WizardTuning {
    *  "tunnel mouth" look from most portal art). */
   portalTintCoreDarkness: number
 
+  // ── Procedural spiral overlay ─────────────────────────────────────────
+  // A rigid-rotation particle layer parented to the cosmic SPZ proxy.
+  // Unlike the dyno-driven swirl above, this never touches splat data —
+  // it's a separate THREE.Points group that spins as a single rigid
+  // body, so it cannot shear / NaN / wedge the GPU. The visible spiral
+  // sells the "this portal is spinning" idea while the underlying SPZ
+  // stays crisp and untouched. Lives in the SPZ's LOCAL XY plane so
+  // moving / rotating / scaling the SPZ via the gizmo drags the spiral
+  // with it (it inherits the SPZ's TRS).
+  /** Master enable for the procedural spiral overlay. */
+  portalSpiralEnabled: boolean
+  /** Number of spiral arms (1–8). Higher = denser visual energy. */
+  portalSpiralArmCount: number
+  /** Points per arm (10–400). Higher = smoother arm, more GPU draw. */
+  portalSpiralDensity: number
+  /** Spiral tightness — full revolutions from centre to rim. 0.5 =
+   *  shallow curl, 3+ = tightly coiled. */
+  portalSpiralTurns: number
+  /** Radius of the spiral in SPZ-local units. The spiral lies in the
+   *  XY plane between (0,0) and ±radius on each axis. */
+  portalSpiralRadius: number
+  /** Rotation rate in rad/s. Positive = CCW from camera looking down
+   *  local +Z. Negative reverses. */
+  portalSpiralSpinRate: number
+  /** Bright core colour (the "hot" centre of each arm). */
+  portalSpiralCoreColor: ColorRGB
+  /** Cool tail colour blended to as points move outward. */
+  portalSpiralTailColor: ColorRGB
+  /** World-space point size before perspective scaling. Higher = chunkier
+   *  blobs; lower = fine sparkle dust. */
+  portalSpiralPointSize: number
+  /** 0..5+ additive emission multiplier. >1 drives bloom for a hot
+   *  plasma look. */
+  portalSpiralGlow: number
+  /** 0..1 size taper from core (0 = uniform, 1 = points shrink to 0 at
+   *  the rim). Combine with tail colour for natural fade-out. */
+  portalSpiralTaper: number
+  /** Z-offset in SPZ-local space (metres). Positive nudges the spiral
+   *  toward the camera-facing side of the SPZ; negative pushes it into
+   *  the splat depth. Useful when the cosmic SPZ has some axial
+   *  thickness and the spiral needs to sit at a specific layer. */
+  portalSpiralOffsetZ: number
+
+  // ── Rigid SPZ spin ─────────────────────────────────────────────────────
+  // The CHEAPEST and SMOOTHEST way to make the cosmic SPZ "spin": just
+  // rotate a wrapper <group> around the SPZ each frame, instead of
+  // computing per-splat rotations in a shader. One mat4 multiply per
+  // frame regardless of splat count, splats stay in their authored
+  // positions (zero shearing / shimmer), can't NaN, can't wedge.
+  //
+  // Compare:
+  //   - portalGeometryAmount (dyno)  → per-splat shader work, can shear
+  //     with windings, can NaN if a uniform goes bad
+  //   - portalRigidSpinRate (this)   → group.rotateOnAxis once per frame,
+  //     buttery smooth, but rotates the SPZ as a single rigid body
+  //
+  // Set the dyno path to 0 (geometryAmount) when using rigid spin to
+  // avoid the two rotation systems compounding awkwardly.
+  /** Rotation rate of the rigid spin wrapper, in rad/s. The axis is
+   *  `portalAxis` (the same vector that already drives the falloff
+   *  region) but applied in the SPZ's LOCAL frame, so tilting the SPZ
+   *  via the gizmo rotates the spin axis with it. 0 = no rigid spin. */
+  portalRigidSpinRate: number
 }
 
 export type SplatPerfPreset = 'performance' | 'balanced' | 'quality'
@@ -366,12 +475,78 @@ export const SPLAT_PERF_PRESETS: Record<SplatPerfPreset, Partial<WizardTuning>> 
   },
 }
 
+/** Named appearance presets for the cosmic-swirl effect. `hypnosis` is the
+ *  current default (slow, mesmerising, soft tint); `dramatic` restores the
+ *  faster, more contrasty look that was the default before v42. Each preset
+ *  re-seeds the full set of swirl + tint fields so flipping back is a
+ *  one-click round-trip without any leftover values from the other mode. */
+export type PortalLookPreset = 'hypnosis' | 'dramatic'
+
+export const PORTAL_LOOK_PRESETS: Record<PortalLookPreset, Partial<WizardTuning>> = {
+  // Slow, continuous, soft — designed to "trance" rather than flash.
+  // Mirrors DEFAULT_WIZARD_TUNING; the preset exists so a user who
+  // tried `dramatic` can get back to the baseline without retyping
+  // each field.
+  //
+  // Uses a thin-disk axial extent (0.2) so the swirl stays in the
+  // SPZ's spiral plane instead of ballooning into 3D. Pure +Y axis
+  // (no tilt) for the same reason — tilted axis + thick falloff was
+  // what made the SPZ look like a fuzzy globe.
+  hypnosis: {
+    portalRadius: 6,
+    // +Z axis → vertical disc falloff (XY plane). Matches a cosmic
+    // SPZ mounted face-on against a wall. Y-axis would give a flying-
+    // saucer slice that misses most of the spiral.
+    portalAxisX: 0,
+    portalAxisY: 0,
+    portalAxisZ: 1,
+    portalStrength: 0,
+    portalSpinRate: 0.5,
+    portalWindings: Math.PI,
+    portalAxialExtent: 0.2,
+    // Tint-only animation by default — splats stay in their authored
+    // spiral pattern (crisp arms, no shearing) while the cyan band
+    // pattern sweeps around the axis at spinRate. This is what the
+    // user wants for the cosmic SPZ: "visible swirling but the splats
+    // don't break". They can dial geometryAmount up if they decide
+    // they DO want the splats to physically rotate.
+    portalGeometryAmount: 0,
+    portalTintEmission: 0.6,
+    portalTintContrast: 1.2,
+    portalTintCoreDarkness: 0.35,
+  },
+  // The pre-hypnosis look: tighter radius, faster spin, sharper /
+  // brighter arm bands. Reads as "actively glowing portal" rather
+  // than "trance". Uses spherical falloff (axialExtent = 1) since
+  // the dramatic look was originally tuned for that, and rotates
+  // visibly with a flat disk anyway.
+  dramatic: {
+    portalRadius: 5,
+    portalAxisX: 0,
+    portalAxisY: 1,
+    portalAxisZ: 0,
+    portalStrength: Math.PI * 0.5,
+    portalSpinRate: 1,
+    portalWindings: Math.PI * 0.5,
+    portalAxialExtent: 1,
+    // Full geometric twist — this is the "rotate the actual splats"
+    // look. Pair with the higher emission/contrast for an active
+    // portal feel where the geometry is clearly churning.
+    portalGeometryAmount: 1,
+    portalTintEmission: 1.5,
+    portalTintContrast: 2,
+    portalTintCoreDarkness: 0.55,
+  },
+}
+
 export interface WizardTuningStore extends WizardTuning {
   setTuning: (partial: Partial<WizardTuning>) => void
   resetTuning: () => void
   applySplatPerfPreset: (preset: SplatPerfPreset) => void
   /** Re-seed every per-field sparkle knob (colours, motion, density…) from a preset. */
   applySparklePreset: (preset: SparklePreset) => void
+  /** Re-seed the full set of cosmic-swirl + tint fields from a named preset. */
+  applyPortalLookPreset: (preset: PortalLookPreset) => void
   resetToken: number
   bumpResetToken: () => void
 }
@@ -592,36 +767,118 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   portalPosX: -26.650,
   portalPosY: 3.67319,
   portalPosZ: -83.276,
-  portalRadius: 5,
+  // ── "Hypnosis swirl" preset baked as the default. Tuned to read as
+  // a slow, mesmerising flow rather than a sharp twist:
+  //   - Radius 6m covers the visible spiral (radius 11 rotated outer
+  //     splats into geometry occlusion = "splats vanished" bug)
+  //   - Axis (0.1, 1, 0) — mostly Y (SPZ symmetry axis) with a slight
+  //     X lean so the swirl wobbles with the SPZ's 9° tilt
+  //   - Twist 0 — no static offset, pure time-driven motion
+  //   - Spin 0.5 rad/s — one revolution every ~12 s, "lazily
+  //     mesmerising" rather than fast
+  //   - Windings π — visible spiral arms without tearing the SPZ
+  // Users can swap to the previous "Dramatic" look via the GUI preset
+  // button (PORTAL_LOOK_PRESETS.dramatic) if they want a faster, more
+  // contrasty swirl.
+  portalRadius: 6,
+  // +Z axis = world depth (into / out of the camera). For a wall-
+  // mounted SPZ that faces roughly along ±Z, this puts the disk
+  // falloff in the world XY plane — a VERTICAL disc, matching the
+  // cosmic spiral's authored orientation. Users can adjust the X/Y/Z
+  // axis sliders if their SPZ is mounted differently. Previously
+  // defaulted to +Y (horizontal disc), which was incompatible with
+  // a vertically-facing spiral and made the swirl region look like
+  // a flying-saucer slice instead of wrapping the spiral pattern.
   portalAxisX: 0,
-  portalAxisY: 1,
-  portalAxisZ: 0,
-  portalStrength: Math.PI,
-  portalSpinRate: 1,
-  // 4π = 2 visible spiral arms at the rim, which is the canonical
-  // portal-vortex silhouette. With portalSpinRate = 1 rad/s the whole
-  // pattern rotates roughly once every 6 s, which reads obviously as
-  // a rotating spiral without being dizzying.
-  portalWindings: Math.PI * 4,
+  portalAxisY: 0,
+  portalAxisZ: 1,
+  portalStrength: 0,
+  portalSpinRate: 0.5,
+  portalWindings: Math.PI,
+  // 0.2 = thin disk perpendicular to the rotation axis. This is what
+  // keeps the cosmic SPZ's 2D spiral pattern flat under the swirl —
+  // without it, the spherical falloff drags axial splats during
+  // rotation and the disk fluffs into a 3D ball.
+  portalAxialExtent: 0.2,
+  // 0 = "swirl-by-tint": the SPZ's splat positions are LEFT ALONE so
+  // its authored spiral pattern stays crisp, and the rotation
+  // illusion comes from the tint pass sweeping the cyan arm bands
+  // around the axis at `portalSpinRate`. Dial up toward 1 to also
+  // rotate the splat positions (looks more 'churning' but starts to
+  // shear the SPZ visibly past ~0.3 with non-zero windings).
+  portalGeometryAmount: 0,
   portalRotationDegX: 9.02233,
   portalRotationDegY: 0,
   portalRotationDegZ: 0,
   portalScale: 8.45987,
   portalGizmoEnabled: false,
   portalGizmoMode: 'translate',
+  portalGizmoTarget: 'splat',
+  // Region centre seeded to the hand-tuned visible-vortex centroid of the
+  // cosmic SPZ at the default splat pose (scale 8.46, X-tilt 9°). With the
+  // proxy at (-26.65, 3.67, -83.28) and the SPZ's internal centroid roughly
+  // (0, ~0.4, 0) in object space, the visible swirl ends up a couple of
+  // metres above + slightly forward of the proxy origin. Defaults below put
+  // the region sphere on top of that visible mass so `Enable swirl` does
+  // something on the very first toggle — without this, the user would see
+  // the same "region empty, swirl invisible" bug as the v38 release.
+  portalRegionPosX: -26.650,
+  portalRegionPosY: 6.5,
+  portalRegionPosZ: -83.276,
   portalShowSphere: true,
 
   // Splat tint — defaults give the same cyan-vortex look but applied
   // directly to the swirled splats themselves. On by default so that
   // when the user enables `portalEnabled`, the splats inside the sphere
   // immediately read as a glowing portal instead of just bent forest.
+  // Tuned for the hypnosis preset: softer arm crests (contrast 1.2,
+  // emission 0.6) blend into a continuous flow instead of strobing
+  // bright bands; gentler core darkness (0.35) keeps it reading as
+  // "swirl" rather than "tunnel". Bumped contrast + emission + core
+  // available via the "Dramatic" GUI preset for the previous look.
   portalTintEnabled: true,
   portalTintColor: [0.35, 0.85, 1.0],
-  portalTintEmission: 1.5,
+  portalTintEmission: 0.6,
   portalTintArms: 3,
   portalTintWindings: 8,
-  portalTintContrast: 2,
-  portalTintCoreDarkness: 0.55,
+  portalTintContrast: 1.2,
+  portalTintCoreDarkness: 0.35,
+
+  // Spiral overlay defaults — OFF by default. The additive overlay
+  // bleeds through world splats (Gaussian Splats don't write depth in
+  // the way standard meshes do, so transparent overlays in front of
+  // them can't be reliably occluded). The rigid-spin path below
+  // gives the "this portal is spinning" feel without that issue, so
+  // we leave the overlay opt-in for users who specifically want it.
+  portalSpiralEnabled: false,
+  portalSpiralArmCount: 3,
+  portalSpiralDensity: 120,
+  portalSpiralTurns: 1.5,
+  portalSpiralRadius: 6,
+  // 0.8 rad/s ≈ one full revolution every ~8s. Reads as "alive" without
+  // being motion-sickness territory. Negative for opposite direction.
+  portalSpiralSpinRate: 0.8,
+  // Hot cyan core → cooler magenta tail. Matches the cosmic SPZ palette
+  // so the overlay reads as the SPZ's own energy.
+  portalSpiralCoreColor: [0.7, 0.95, 1.0],
+  portalSpiralTailColor: [0.55, 0.3, 0.95],
+  portalSpiralPointSize: 0.18,
+  // 1.4 = slight HDR push so additive blending produces a glow halo
+  // around each point. >2 starts driving the bloom pass.
+  portalSpiralGlow: 1.4,
+  // 0.55 = points are ~half-size at the tail. Combined with the tail
+  // colour shift, this gives a soft "evaporating" arm-end feel.
+  portalSpiralTaper: 0.55,
+  // 0 = spiral sits exactly in the SPZ's local XY plane. Bump a few
+  // cm if the cosmic SPZ has thickness that swallows the spiral.
+  portalSpiralOffsetZ: 0,
+
+  // 0 = SPZ stays perfectly still in place. The "spinning portal"
+  // illusion comes entirely from the dyno tint pass (cyan bands
+  // sweeping around the axis without touching splat positions).
+  // Users who want physical rotation can crank this from the GUI;
+  // ±6.28 rad/s ≈ ±1 revolution/sec.
+  portalRigidSpinRate: 0,
 
   sparkleFollowCharacter: true,
   // Defaults to 0 (snap-follow): the spawn box tracks the player tightly,
@@ -643,6 +900,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       resetTuning: () => set({ ...DEFAULT_WIZARD_TUNING }),
       applySplatPerfPreset: (preset) => set(SPLAT_PERF_PRESETS[preset]),
       applySparklePreset: (preset) => set(sparklePresetToTuning(preset)),
+      applyPortalLookPreset: (preset) => set(PORTAL_LOOK_PRESETS[preset]),
       bumpResetToken: () => set((s) => ({ resetToken: s.resetToken + 1 })),
     }),
     {
@@ -696,7 +954,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // Smoothing default reverts to 0 since it's no longer needed as a
       // workaround (still exposed for users who want a deliberate "fog"
       // trailing feel).
-      version: 38,
+      version: 48,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -938,6 +1196,170 @@ export const useWizardTuning = create<WizardTuningStore>()(
           migrated.portalRotationDegY = DEFAULT_WIZARD_TUNING.portalRotationDegY
           migrated.portalRotationDegZ = DEFAULT_WIZARD_TUNING.portalRotationDegZ
           migrated.portalScale = DEFAULT_WIZARD_TUNING.portalScale
+        }
+        // v39: split the swirl-region centre from the SPZ proxy position.
+        // Previously, the translucent region sphere was a child of the
+        // SPZ's proxy group, so it sat at the proxy origin — but the
+        // cosmic SPZ's visible mass is offset from its object-space
+        // origin, which meant the sphere (and therefore the falloff
+        // volume the worldModifier reads from `portalCenter`) covered
+        // empty world space and the splats never entered it → "Enable
+        // swirl does nothing". The new `portalRegionPos*` fields hold
+        // an independent world-space centre for the region; defaulting
+        // to the hand-tuned visible-vortex spot on top of the SPZ means
+        // first-load swirl actually works. `portalGizmoTarget = 'splat'`
+        // preserves the v38 gizmo-on-splat behaviour for users coming
+        // from the previous version.
+        if (fromVersion < 39) {
+          migrated.portalRegionPosX = DEFAULT_WIZARD_TUNING.portalRegionPosX
+          migrated.portalRegionPosY = DEFAULT_WIZARD_TUNING.portalRegionPosY
+          migrated.portalRegionPosZ = DEFAULT_WIZARD_TUNING.portalRegionPosZ
+          migrated.portalGizmoTarget = DEFAULT_WIZARD_TUNING.portalGizmoTarget
+        }
+        // v40: re-aim the swirl and stop tearing the splats apart.
+        //
+        // First attempt: tried to flip the swirl axis to world +X
+        // based on "swirl when facing the character" intent. This was
+        // wrong for the cosmic SPZ — rotating around its non-symmetry
+        // axis tipped the spiral disk edge-on to the camera and made
+        // it appear to vanish. v41 below corrects the axis back to Y
+        // (the SPZ's actual symmetry axis), but keeps the v40 strength
+        // and windings dial-down because those were genuine wins
+        // (original π + 4π values shredded the splats regardless of
+        // axis). We still run the v40 block on older states so they
+        // pick up the gentler strength immediately, but v41 overwrites
+        // the axis fields that v40 got wrong.
+        if (fromVersion < 40) {
+          migrated.portalStrength = DEFAULT_WIZARD_TUNING.portalStrength
+        }
+        // v41: restore the swirl axis to the SPZ's symmetry axis (+Y)
+        // and adopt a small `windings` term so the otherwise-invisible
+        // rigid rotation around that axis becomes visible as a per-
+        // radius differential twist. v40 had set windings to 0 + axis
+        // to X, which is "valid" but for the cosmic SPZ specifically
+        // it (a) made the SPZ disappear by flipping it edge-on, and
+        // (b) would have been invisible anyway if the axis was Y. The
+        // v41 combination — Y-axis rotation + small per-radius warp —
+        // gives a smooth, readable swirl on the actual asset.
+        if (fromVersion < 41) {
+          migrated.portalAxisX = DEFAULT_WIZARD_TUNING.portalAxisX
+          migrated.portalAxisY = DEFAULT_WIZARD_TUNING.portalAxisY
+          migrated.portalAxisZ = DEFAULT_WIZARD_TUNING.portalAxisZ
+          migrated.portalWindings = DEFAULT_WIZARD_TUNING.portalWindings
+        }
+        // v42: apply the "Hypnosis swirl" preset as the new defaults.
+        // Slower spin, larger radius, softer tint — designed to read as
+        // a continuous mesmerising flow rather than a sharp twist. Users
+        // who liked the old look can one-click revert via the GUI's
+        // "Dramatic" preset button (see WizardGui's Cosmic swirl folder).
+        // Force-apply via Object.assign so users on intermediate states
+        // (v40/v41) snap straight to the hypnosis defaults regardless of
+        // whatever values their slider tinkering landed on.
+        if (fromVersion < 42) {
+          Object.assign(migrated, PORTAL_LOOK_PRESETS.hypnosis)
+        }
+        // v43: introduces `portalAxialExtent` (disk-shape falloff).
+        // Without this field the worldModifier reads `undefined` and
+        // the falloff exponent ends up NaN, which silently zeros every
+        // splat's alpha → cosmic SPZ appears to vanish. Re-apply the
+        // hypnosis preset so existing persisted states pick up both
+        // the new field AND the corrected axis (the v42 hypnosis had
+        // a 0.1 X-axis tilt that warped the SPZ into 3D; v43 zeros
+        // the tilt and adds the disk falloff so the spiral stays flat).
+        if (fromVersion < 43) {
+          Object.assign(migrated, PORTAL_LOOK_PRESETS.hypnosis)
+        }
+        // v44: flip default rotation axis from +Y → +Z so the falloff
+        // disc lies in the world XY plane (vertical). The +Y default
+        // produced a horizontal disc that didn't match a wall-mounted
+        // cosmic SPZ's authored vertical spiral. Re-applying the full
+        // hypnosis preset also picks up the corresponding axis change
+        // in the preset definition so existing states snap to the new
+        // canonical orientation.
+        if (fromVersion < 44) {
+          Object.assign(migrated, PORTAL_LOOK_PRESETS.hypnosis)
+        }
+        // v45: introduces `portalGeometryAmount` (0..1 multiplier on
+        // the geometric twist, independent from the tint animation).
+        // We re-apply the hypnosis preset so existing users get the
+        // new "tint-only" default (geometryAmount = 0). Users who
+        // had switched to the dramatic preset will lose their custom
+        // geometryAmount, but they can re-apply it with one click in
+        // the GUI — versus the alternative of leaving the field
+        // undefined and feeding NaN into the shader on first frame.
+        if (fromVersion < 45) {
+          Object.assign(migrated, PORTAL_LOOK_PRESETS.hypnosis)
+        }
+        // v46: introduces the procedural spiral overlay (a rigid-body
+        // particle layer that fakes the swirl without touching splat
+        // positions). Seed every field from defaults so the new
+        // overlay shows up immediately for existing users; they had
+        // no spiral fields persisted, so undefined → defaults would
+        // resolve at runtime anyway, but pumping them here means the
+        // GUI sliders all read non-empty on first paint.
+        if (fromVersion < 46) {
+          migrated.portalSpiralEnabled = DEFAULT_WIZARD_TUNING.portalSpiralEnabled
+          migrated.portalSpiralArmCount = DEFAULT_WIZARD_TUNING.portalSpiralArmCount
+          migrated.portalSpiralDensity = DEFAULT_WIZARD_TUNING.portalSpiralDensity
+          migrated.portalSpiralTurns = DEFAULT_WIZARD_TUNING.portalSpiralTurns
+          migrated.portalSpiralRadius = DEFAULT_WIZARD_TUNING.portalSpiralRadius
+          migrated.portalSpiralSpinRate = DEFAULT_WIZARD_TUNING.portalSpiralSpinRate
+          migrated.portalSpiralCoreColor = [...DEFAULT_WIZARD_TUNING.portalSpiralCoreColor]
+          migrated.portalSpiralTailColor = [...DEFAULT_WIZARD_TUNING.portalSpiralTailColor]
+          migrated.portalSpiralPointSize = DEFAULT_WIZARD_TUNING.portalSpiralPointSize
+          migrated.portalSpiralGlow = DEFAULT_WIZARD_TUNING.portalSpiralGlow
+          migrated.portalSpiralTaper = DEFAULT_WIZARD_TUNING.portalSpiralTaper
+          migrated.portalSpiralOffsetZ = DEFAULT_WIZARD_TUNING.portalSpiralOffsetZ
+          // Also flip the dyno geometric twist off — the spiral
+          // overlay replaces it, and running both creates conflicting
+          // motion that's hard to reason about. The user can still
+          // toggle the dyno path back on from the GUI.
+          migrated.portalGeometryAmount = 0
+        }
+        // v47: pivot to rigid-body spin as the primary motion path.
+        //   - Spiral overlay → OFF (the additive blend bleeding through
+        //     world splats was visually wrong, and users didn't like
+        //     the look anyway).
+        //   - Rigid spin rate → 0.5 rad/s default (~12 s per revolution),
+        //     animated by rotating a wrapper <group> around the SPZ
+        //     once per frame. Smoothest possible because it's just a
+        //     matrix multiply per frame — no per-splat shader work,
+        //     no shearing, no NaN risk.
+        //   - Dyno geometric twist → kept at 0 so the two paths don't
+        //     compound (user can re-enable from the GUI if they
+        //     specifically want the windings-shear look).
+        if (fromVersion < 47) {
+          migrated.portalSpiralEnabled = false
+          migrated.portalRigidSpinRate = 0.5
+          migrated.portalGeometryAmount = 0
+        }
+        // v48: the SPZ should stay STILL in place. User reported that
+        // rigid-body rotation tipped the spiral SPZ edge-on at
+        // various angles, which made it look like a thin streak
+        // rather than a portal. The fix: drop ALL physical motion of
+        // the SPZ and use only the dyno tint pass for visible
+        // animation. Tint bands (cyan, by default) sweep around the
+        // axis at `portalSpinRate` rad/s — splats stay perfectly
+        // pinned to their authored positions, only their COLOUR
+        // animates. Reads as "spinning portal" without any geometry
+        // actually moving.
+        //
+        // We crank the tint emission and contrast so the band
+        // animation reads clearly on the cosmic SPZ (which already
+        // has its own arm pattern that can camouflage subtle tint).
+        if (fromVersion < 48) {
+          migrated.portalRigidSpinRate = 0
+          migrated.portalGeometryAmount = 0
+          // The dyno must be on for the tint pass to run.
+          migrated.portalEnabled = true
+          // Tint pass on, with parameters tuned to be obviously
+          // visible. 1.0 rad/s ≈ one cyan-band revolution every
+          // 6.3 s, which reads as clear motion without inducing
+          // motion sickness.
+          migrated.portalTintEnabled = true
+          migrated.portalSpinRate = 1.0
+          migrated.portalTintEmission = 1.5
+          migrated.portalTintContrast = 2.0
         }
         return migrated
       },

@@ -20,8 +20,10 @@ import { useEffect, useRef } from 'react'
 import GUI from 'lil-gui'
 import {
   DEFAULT_WIZARD_TUNING,
+  PORTAL_LOOK_PRESETS,
   SPLAT_PERF_PRESETS,
   useWizardTuning,
+  type PortalLookPreset,
   type ShadowMapType,
   type SplatPerfPreset,
   type WizardTuning,
@@ -337,21 +339,79 @@ export function WizardGui() {
     const portalControls: Array<{ updateDisplay: () => void }> = []
     const refreshPortalDisplay = () => portalControls.forEach((c) => c.updateDisplay())
     portalControls.push(
-      portalFolder.add(tAny, 'portalEnabled').name('Enable swirl').onChange(push('portalEnabled')),
       portalFolder.add(tAny, 'portalShowSphere').name('Show region sphere').onChange(push('portalShowSphere')),
       portalFolder.add(tAny, 'portalGizmoEnabled').name('3D gizmo (visual)').onChange(push('portalGizmoEnabled')),
+      // Target picker: choose what the single in-canvas gizmo controls.
+      // 'splat' = the cosmic SPZ proxy (full TRS).
+      // 'region' = the swirl falloff sphere centre (translate-only).
+      // Decoupled in v39 so the swirl region can be dragged onto the
+      // visible splat without moving the splat itself — fixes "Enable
+      // swirl does nothing" when the SPZ's internal centroid is offset
+      // from its object-space origin (cosmic SPZ is several metres off).
+      portalFolder.add(tAny, 'portalGizmoTarget', ['splat', 'region'])
+        .name('Gizmo target').onChange(push('portalGizmoTarget')),
       // Mode picker mirrors the world splat's `splatGizmoMode` UX so
       // translate/rotate/scale all share one handle in the canvas — no
-      // need to keep three separate gizmos mounted at once.
+      // need to keep three separate gizmos mounted at once. (When the
+      // gizmo target is 'region' the mode is forced to translate inside
+      // PortalScene because rotation/scale don't affect the falloff.)
       portalFolder.add(tAny, 'portalGizmoMode', ['translate', 'rotate', 'scale'])
-        .name('Gizmo mode').onChange(push('portalGizmoMode')),
+        .name('Gizmo mode (splat only)').onChange(push('portalGizmoMode')),
     )
-    const portalPosFolder = portalFolder.addFolder('Position (world)')
+    // ── Look presets: one-click between mesmerising "Hypnosis" (the
+    // current default) and the previous "Dramatic" look. Each preset
+    // re-seats the full swirl-shape + tint field set, so flipping
+    // back and forth is a true round-trip with no leftover values
+    // from the other mode. Mirrors the SPLAT_PERF_PRESETS button
+    // pattern further up the GUI for consistency.
+    const applyPortalLook = (preset: PortalLookPreset) => () => {
+      useWizardTuning.getState().applyPortalLookPreset(preset)
+      Object.assign(tAny, PORTAL_LOOK_PRESETS[preset])
+      refreshPortalDisplay()
+    }
+    portalFolder.add({ p: applyPortalLook('hypnosis') }, 'p').name('▶ Preset: Hypnosis')
+    portalFolder.add({ p: applyPortalLook('dramatic') }, 'p').name('▶ Preset: Dramatic')
+    // Panic button: flips the swirl OFF without losing any other tuning.
+    // Use this if the SPZ appears to have "vanished" — toggling the
+    // modifier off proves whether the disappearance is the worldModifier
+    // rotating splats out of view (most common: they snap right back
+    // after the toggle) vs. a real load / render failure of the SPZ
+    // itself (still gone with swirl off → check console for errors).
+    portalFolder.add({
+      p: () => {
+        useWizardTuning.getState().setTuning({ portalEnabled: false })
+        tAny.portalEnabled = false
+        refreshPortalDisplay()
+      },
+    }, 'p').name('⏸ Pause swirl (recover SPZ)')
+    const portalPosFolder = portalFolder.addFolder('Splat position (world)')
     portalControls.push(
       portalPosFolder.add(tAny, 'portalPosX', -200, 200, 0.1).name('X').onChange(push('portalPosX')),
       portalPosFolder.add(tAny, 'portalPosY', -50, 100, 0.1).name('Y').onChange(push('portalPosY')),
       portalPosFolder.add(tAny, 'portalPosZ', -200, 200, 0.1).name('Z').onChange(push('portalPosZ')),
     )
+    // ── Swirl region position (independent from splat) — the centre of
+    // the falloff sphere that the worldModifier reads from. Must overlap
+    // the visible splat content for `Enable swirl` to do anything; the
+    // "Snap region to splat" action below puts it on top of the SPZ's
+    // proxy origin which is the usual desired starting point.
+    const portalRegionPosFolder = portalFolder.addFolder('Region position (world)')
+    portalControls.push(
+      portalRegionPosFolder.add(tAny, 'portalRegionPosX', -200, 200, 0.1).name('X').onChange(push('portalRegionPosX')),
+      portalRegionPosFolder.add(tAny, 'portalRegionPosY', -50, 100, 0.1).name('Y').onChange(push('portalRegionPosY')),
+      portalRegionPosFolder.add(tAny, 'portalRegionPosZ', -200, 200, 0.1).name('Z').onChange(push('portalRegionPosZ')),
+    )
+    const snapRegionAction = {
+      'Snap region to splat': () => {
+        const s = useWizardTuning.getState()
+        s.setTuning({
+          portalRegionPosX: s.portalPosX,
+          portalRegionPosY: s.portalPosY,
+          portalRegionPosZ: s.portalPosZ,
+        })
+      },
+    }
+    portalRegionPosFolder.add(snapRegionAction, 'Snap region to splat')
     // Rotation: degrees so users have intuitive numbers to type. The
     // PortalScene converts to radians at apply time. ±360 range so a user
     // can scrub past a full revolution without the slider clamping.
@@ -367,7 +427,27 @@ export function WizardGui() {
     portalControls.push(
       portalScaleFolder.add(tAny, 'portalScale', 0.05, 20, 0.05).name('Uniform').onChange(push('portalScale')),
     )
-    const portalShapeFolder = portalFolder.addFolder('Shape + spin')
+    // ── Effects — everything that runs as part of the Spark dyno
+    // worldModifier on the cosmic SPZ. Grouped under one folder so the
+    // top-level Cosmic swirl panel stays focused on placement (gizmo +
+    // position/rotation/scale) while the visual effect controls live
+    // together. The "Enable swirl" master toggle is the first child so
+    // it reads as the on/off switch for the whole effect block — every
+    // sub-folder below it only matters when this is on.
+    const portalEffectsFolder = portalFolder.addFolder('Effects')
+    portalControls.push(
+      portalEffectsFolder.add(tAny, 'portalEnabled').name('Enable swirl (dyno)').onChange(push('portalEnabled')),
+      // Rigid spin — the headline knob for "make the SPZ rotate". This
+      // path rotates the SPZ as a single rigid body each frame (one
+      // matrix multiply, splats stay perfectly intact). It is
+      // INDEPENDENT from the dyno "Enable swirl" toggle above: you
+      // can run rigid spin with the dyno entirely off (recommended
+      // for the smoothest look), with just the tint dyno on (so
+      // colour bands sweep over the spinning SPZ), or stack both
+      // for max effect. 0 = no rigid spin. ±6.28 rad/s ≈ ±1 rev/s.
+      portalEffectsFolder.add(tAny, 'portalRigidSpinRate', -6.28, 6.28, 0.01).name('Rigid spin (rad/s)').onChange(push('portalRigidSpinRate')),
+    )
+    const portalShapeFolder = portalEffectsFolder.addFolder('Swirl shape + spin')
     portalControls.push(
       // No min/max on radius so users can scale up to a "warp the whole
       // world" stress test; sane scrub step keeps the slider usable.
@@ -384,19 +464,47 @@ export function WizardGui() {
       // Spin rate adds continuous animation. 1 rad/s ≈ one revolution every
       // 6.3 s at the centre. Negative values reverse the swirl direction.
       portalShapeFolder.add(tAny, 'portalSpinRate', -6.28, 6.28, 0.01).name('Spin (rad/s)').onChange(push('portalSpinRate')),
+      // Disk shape: 1.0 = sphere falloff (rotates a 3D region), 0.2 =
+      // thin disk perpendicular to the axis (rotates a 2D slice). For
+      // a 2D-spiral SPZ like the cosmic vortex, keep this LOW (≤ 0.3)
+      // so the swirl stays in-plane and doesn't fluff the disk into a
+      // 3D ball. Bump toward 1.0 if you want a 3D smoke-warp effect.
+      portalShapeFolder.add(tAny, 'portalAxialExtent', 0.05, 1, 0.01).name('Axial extent (disk↔sphere)').onChange(push('portalAxialExtent')),
+      // Splat-rotation amount. THIS is the "don't shred my SPZ" knob.
+      //   0 → splats stay in their authored positions; the rotation
+      //       illusion comes from the tint pass animating its arm
+      //       bands around the axis. Crisp authored spiral pattern is
+      //       preserved exactly.
+      //   1 → splats physically rotate (full geometric twist). With
+      //       non-zero Windings, outer splats rotate more than inner
+      //       ones and you see visible shearing on a stationary SPZ.
+      //   ~0.15-0.3 → subtle physical wobble while mostly keeping the
+      //       authored pattern. Often the most "alive" look.
+      // Tint speed (spinRate) and arm count are unaffected by this
+      // slider, so colour flow keeps moving regardless.
+      portalShapeFolder.add(tAny, 'portalGeometryAmount', 0, 1, 0.01).name('Splat rotation (0=tint only)').onChange(push('portalGeometryAmount')),
     )
-    const portalAxisFolder = portalFolder.addFolder('Axis (will normalise)')
+    const portalAxisFolder = portalEffectsFolder.addFolder('Swirl axis (will normalise)')
     portalControls.push(
-      portalAxisFolder.add(tAny, 'portalAxisX', -1, 1, 0.01).name('X').onChange(push('portalAxisX')),
-      portalAxisFolder.add(tAny, 'portalAxisY', -1, 1, 0.01).name('Y (up = vortex)').onChange(push('portalAxisY')),
-      portalAxisFolder.add(tAny, 'portalAxisZ', -1, 1, 0.01).name('Z').onChange(push('portalAxisZ')),
+      // Range widened from ±1 → ±5 so the user can express axis
+      // directions more precisely. Values are normalised in the
+      // shader so absolute magnitude doesn't matter — but a vector
+      // like (1, 0, 5) describes a different unit direction (mostly
+      // +Z with a small +X tilt) than (0.2, 0, 1) would describe
+      // at the same nominal step size. ±5 gives ~25× finer angular
+      // control near the major-axis directions without losing the
+      // ability to type any value (lil-gui lets users override the
+      // clamp by clicking the number and typing).
+      portalAxisFolder.add(tAny, 'portalAxisX', -5, 5, 0.01).name('X').onChange(push('portalAxisX')),
+      portalAxisFolder.add(tAny, 'portalAxisY', -5, 5, 0.01).name('Y (up = vortex)').onChange(push('portalAxisY')),
+      portalAxisFolder.add(tAny, 'portalAxisZ', -5, 5, 0.01).name('Z').onChange(push('portalAxisZ')),
     )
     // ── Splat tint — the recolour pass baked into the worldModifier itself.
     // This is what makes the swirled splats actually LOOK like a cyan portal
     // (glowing arms, dark core) instead of just bent forest. Pairs naturally
     // with the geometry twist above: the falloff sphere is shared, so the
     // colour boundary always matches the bend boundary.
-    const portalTintFolder = portalFolder.addFolder('Splat tint (in-portal)')
+    const portalTintFolder = portalEffectsFolder.addFolder('Splat tint (in-portal)')
     portalControls.push(
       portalTintFolder.add(tAny, 'portalTintEnabled').name('Enable recolour').onChange(push('portalTintEnabled')),
       portalTintFolder.addColor(tAny, 'portalTintColor').name('Tint colour').onChange(push('portalTintColor')),
@@ -407,6 +515,37 @@ export function WizardGui() {
       portalTintFolder.add(tAny, 'portalTintWindings', 1, 30, 0.1).name('Winding tightness').onChange(push('portalTintWindings')),
       portalTintFolder.add(tAny, 'portalTintContrast', 1, 5, 0.05).name('Arm sharpness').onChange(push('portalTintContrast')),
       portalTintFolder.add(tAny, 'portalTintCoreDarkness', 0, 1, 0.01).name('Core darkness').onChange(push('portalTintCoreDarkness')),
+    )
+
+    // ── Spiral overlay — a procedural rotating-spiral particle layer
+    // parented to the cosmic SPZ proxy. Unlike the dyno geometric
+    // twist above, this never touches splat positions, so it can't
+    // shear / NaN / wedge the GPU. Spins as a single rigid body — the
+    // SPZ stays crisp, the spiral sells the motion. Recommended as
+    // the primary "is this portal alive?" effect; turn the dyno
+    // Geometry slider above to 0 when this is on to avoid the two
+    // motion systems fighting each other.
+    const portalSpiralFolder = portalEffectsFolder.addFolder('Spiral overlay (rigid)')
+    portalControls.push(
+      portalSpiralFolder.add(tAny, 'portalSpiralEnabled').name('Enable spiral').onChange(push('portalSpiralEnabled')),
+      // Spin rate is the headline knob — pulling this above the other
+      // controls so the user can immediately answer "is it moving?".
+      // ±6.28 rad/s ≈ ±1 revolution/sec at most extreme.
+      portalSpiralFolder.add(tAny, 'portalSpiralSpinRate', -6.28, 6.28, 0.01).name('Spin (rad/s)').onChange(push('portalSpiralSpinRate')),
+      portalSpiralFolder.add(tAny, 'portalSpiralArmCount', 1, 8, 1).name('Arms').onChange(push('portalSpiralArmCount')),
+      // Density rebuilds the buffer — keep the upper bound conservative
+      // so the user can't accidentally crank to a million-point buffer.
+      portalSpiralFolder.add(tAny, 'portalSpiralDensity', 10, 400, 1).name('Density / arm').onChange(push('portalSpiralDensity')),
+      portalSpiralFolder.add(tAny, 'portalSpiralTurns', 0.1, 5, 0.05).name('Spiral tightness').onChange(push('portalSpiralTurns')),
+      portalSpiralFolder.add(tAny, 'portalSpiralRadius', 0.5, 20, 0.1).name('Radius (m)').onChange(push('portalSpiralRadius')),
+      portalSpiralFolder.addColor(tAny, 'portalSpiralCoreColor').name('Core colour').onChange(push('portalSpiralCoreColor')),
+      portalSpiralFolder.addColor(tAny, 'portalSpiralTailColor').name('Tail colour').onChange(push('portalSpiralTailColor')),
+      portalSpiralFolder.add(tAny, 'portalSpiralPointSize', 0.02, 1, 0.01).name('Point size (m)').onChange(push('portalSpiralPointSize')),
+      // Glow above 1 drives bloom — that's where the "plasma vortex"
+      // look comes from. Below 1 produces a softer painted feel.
+      portalSpiralFolder.add(tAny, 'portalSpiralGlow', 0.1, 5, 0.05).name('Glow (×)').onChange(push('portalSpiralGlow')),
+      portalSpiralFolder.add(tAny, 'portalSpiralTaper', 0, 1, 0.01).name('Tail taper').onChange(push('portalSpiralTaper')),
+      portalSpiralFolder.add(tAny, 'portalSpiralOffsetZ', -2, 2, 0.01).name('Offset (local Z)').onChange(push('portalSpiralOffsetZ')),
     )
 
     // ── Quick-action: drop the portal centre on the wizard's current feet
@@ -438,15 +577,24 @@ export function WizardGui() {
     // Sync slider readouts when the gizmo / store writes them externally.
     const unsubPortal = useWizardTuning.subscribe((s, prev) => {
       const keys: Array<keyof WizardTuning> = [
-        'portalEnabled', 'portalShowSphere', 'portalGizmoEnabled', 'portalGizmoMode',
+        'portalEnabled', 'portalShowSphere',
+        'portalGizmoEnabled', 'portalGizmoMode', 'portalGizmoTarget',
         'portalPosX', 'portalPosY', 'portalPosZ',
+        'portalRegionPosX', 'portalRegionPosY', 'portalRegionPosZ',
         'portalRotationDegX', 'portalRotationDegY', 'portalRotationDegZ',
         'portalScale',
         'portalRadius', 'portalStrength', 'portalWindings', 'portalSpinRate',
+        'portalAxialExtent', 'portalGeometryAmount',
         'portalAxisX', 'portalAxisY', 'portalAxisZ',
         'portalTintEnabled', 'portalTintColor', 'portalTintEmission',
         'portalTintArms', 'portalTintWindings', 'portalTintContrast',
         'portalTintCoreDarkness',
+        'portalSpiralEnabled', 'portalSpiralArmCount', 'portalSpiralDensity',
+        'portalSpiralTurns', 'portalSpiralRadius', 'portalSpiralSpinRate',
+        'portalSpiralCoreColor', 'portalSpiralTailColor',
+        'portalSpiralPointSize', 'portalSpiralGlow', 'portalSpiralTaper',
+        'portalSpiralOffsetZ',
+        'portalRigidSpinRate',
       ]
       if (keys.some((k) => s[k] !== prev[k])) {
         for (const k of keys) tAny[k] = s[k]

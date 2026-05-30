@@ -59,6 +59,42 @@ export interface PortalTwistInitial {
    * dimensional portal rather than a uniformly twisted region.
    */
   windings?: number
+  /**
+   * Shape of the falloff window along the rotation axis. The radial
+   * falloff is always a Gaussian with `radius` as its sigma; this
+   * controls how far the same Gaussian extends in the axial direction
+   * (parallel to `axis`).
+   *   - `1.0` (default) — axial extent == radial extent. The influence
+   *     region is a perfect sphere. Best for warping 3D regions of a
+   *     volumetric splat scene (e.g. world splat).
+   *   - `0.2` — axial extent is 20% of radial. Influence becomes a
+   *     flat disk perpendicular to the axis. Best for warping splats
+   *     that themselves form a 2D pattern (e.g. the cosmic SPZ's
+   *     spiral disk) — without this, axial-direction splats get
+   *     rotated into 3D space and fluff the disk into a ball.
+   *   - `→ 0` — degenerates to a thin slice; numerically clamped to
+   *     1e-4 to avoid divide-by-zero in the shader.
+   * Independent from `radius` so users can dial the disk's thickness
+   * without resizing its diameter.
+   */
+  axialExtent?: number
+  /**
+   * 0..1 master multiplier on the GEOMETRIC twist (twistStrength,
+   * time × spinRate, windings × radial/r). Independent from the tint
+   * pass, so:
+   *   - 1.0 → full geometric rotation of splats (current behaviour;
+   *     outer splats rotate more than inner, creating visible spiral
+   *     arms but distorting the SPZ's authored pattern).
+   *   - 0.0 → splats stay in their authored positions (crisp); the
+   *     tint pass still animates so the cyan arm bands sweep around
+   *     the axis over time. Use this when you want a "still SPZ with
+   *     visible swirling motion" effect — common for splats that
+   *     already encode their own spiral pattern (e.g. cosmic vortex).
+   * The tint band animation always runs at the unchanged
+   * `time × spinRate` rate, so `spinRate` controls speed regardless
+   * of `geometryAmount`.
+   */
+  geometryAmount?: number
   enabled?: boolean
   // ── Splat colour modulation: makes the twisted splats *look* like a
   // glowing portal (cyan vortex, arm bands, dark core) instead of just
@@ -100,6 +136,12 @@ export interface PortalTwistControls {
   readonly strength: { value: number }
   readonly spinRate: { value: number }
   readonly windings: { value: number }
+  /** Mutable 0..1 axial-extent multiplier. 1 = sphere falloff, ~0.2 =
+   *  flat-disk falloff perpendicular to `axis`. */
+  readonly axialExtent: { value: number }
+  /** 0..1 multiplier on the geometric splat-position twist. 1 = full,
+   *  0 = splats don't move but the tint pass still animates. */
+  readonly geometryAmount: { value: number }
   readonly enabled: { value: boolean }
   readonly tintEnabled: { value: boolean }
   readonly tintColor: { value: THREE.Color }
@@ -133,6 +175,16 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
   const dStrength = d.dynoFloat(initial?.strength ?? Math.PI)
   const dSpinRate = d.dynoFloat(initial?.spinRate ?? 1)
   const dWindings = d.dynoFloat(initial?.windings ?? 0)
+  // Default 1.0 = sphere falloff (preserves the pre-disk-falloff
+  // behaviour for any caller that doesn't set this — i.e. world-splat
+  // experiments). The cosmic SPZ overrides this to ~0.2 to keep its
+  // 2D spiral from ballooning under the swirl.
+  const dAxialExtent = d.dynoFloat(initial?.axialExtent ?? 1)
+  // Default 1.0 = full geometric twist (backwards-compatible).
+  // Cosmic SPZ overrides to 0 for "tint-only animation" — splats
+  // stay in their authored spiral pattern (no shearing) while the
+  // tint pass animates the cyan bands around the axis.
+  const dGeometryAmount = d.dynoFloat(initial?.geometryAmount ?? 1)
   const dTime = d.dynoFloat(0)
   const dEnabled = d.dynoBool(initial?.enabled ?? true)
   const dTintEnabled = d.dynoBool(initial?.tintEnabled ?? true)
@@ -163,6 +215,8 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       twistStrength: 'float'
       spinRate: 'float'
       windings: 'float'
+      axialExtent: 'float'
+      geometryAmount: 'float'
       time: 'float'
       enabled: 'bool'
       tintEnabled: 'bool'
@@ -185,6 +239,8 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       twistStrength: 'float',
       spinRate: 'float',
       windings: 'float',
+      axialExtent: 'float',
+      geometryAmount: 'float',
       time: 'float',
       enabled: 'bool',
       tintEnabled: 'bool',
@@ -203,6 +259,8 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       twistStrength: dStrength,
       spinRate: dSpinRate,
       windings: dWindings,
+      axialExtent: dAxialExtent,
+      geometryAmount: dGeometryAmount,
       time: dTime,
       enabled: dEnabled,
       tintEnabled: dTintEnabled,
@@ -217,7 +275,14 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       // Local position relative to the portal centre (world space).
       `vec3 _local = ${inputs.center} - ${inputs.portalCenter};`,
       // Normalise axis defensively in case the JS side wrote a non-unit vec.
-      `vec3 _axis = normalize(${inputs.portalAxis});`,
+      // We also handle the zero-vector and NaN cases — `normalize(vec3(0))`
+      // returns NaN on most GPUs, which would feed NaN into every
+      // subsequent calculation. Fall back to +Y when the input is
+      // degenerate (zero magnitude or non-finite components).
+      `vec3 _axisIn = ${inputs.portalAxis};`,
+      `float _axisLen = length(_axisIn);`,
+      `bool _axisOk = (_axisLen > 1e-6) && (_axisIn.x == _axisIn.x) && (_axisIn.y == _axisIn.y) && (_axisIn.z == _axisIn.z);`,
+      `vec3 _axis = _axisOk ? (_axisIn / _axisLen) : vec3(0.0, 1.0, 0.0);`,
       // Avoid divide-by-zero from a slider parked at 0 m radius.
       `float _r = max(1e-4, ${inputs.portalRadius});`,
       `float _dist = length(_local);`,
@@ -226,11 +291,28 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       // the spherical `_dist` is reserved for the influence-volume falloff.
       `float _axial = dot(_local, _axis);`,
       `float _radial = length(_local - _axis * _axial);`,
-      // Gaussian-style falloff: 1 at the centre, ~0.37 at one radius,
-      // ~0.018 at 2× radius. Smooth derivative means no visible seam at
-      // the edge of the influence sphere — important since the splats
-      // we're twisting are part of a continuous world.
-      `float _falloff = ${inputs.enabled} ? exp(-(_dist * _dist) / (_r * _r)) : 0.0;`,
+      // Separable Gaussian falloff — radial and axial use independent
+      // sigmas so the influence region can be a sphere (axialExtent =
+      // 1) OR a flat disk perpendicular to the axis (axialExtent → 0).
+      //
+      //   _radialFalloff = exp(-(_radial² / _r²))
+      //   _axialFalloff  = exp(-(_axial²  / (_r × axialExtent)²))
+      //   _falloff       = enabled ? _radialFalloff × _axialFalloff : 0
+      //
+      // When axialExtent = 1 the product collapses to exp(-_dist² / _r²)
+      // (same as the original spherical falloff) since _dist² = _axial²
+      // + _radial². With axialExtent ≈ 0.2 the axial Gaussian's sigma
+      // is 5× tighter than the radial one, so splats more than ~0.2 ×
+      // radius along the axis are excluded — which is exactly what a
+      // 2D-spiral SPZ needs to stay flat under the swirl.
+      // axialExtent is clamped at the GLSL level rather than the JS
+      // side so a stale persisted state (pre-v43) that arrives as
+      // exact-0 / negative / NaN can't escape into the falloff sigma
+      // and yield NaN exponents.
+      `float _axialR = max(1e-4, _r * max(1e-4, ${inputs.axialExtent}));`,
+      `float _radialFalloff = exp(-(_radial * _radial) / (_r * _r));`,
+      `float _axialFalloff = exp(-(_axial * _axial) / (_axialR * _axialR));`,
+      `float _falloff = ${inputs.enabled} ? (_radialFalloff * _axialFalloff) : 0.0;`,
       // The angle a splat is rotated by is composed of three parts:
       //   - `twistStrength`     : a base offset (so the whole region looks
       //                           "wound up" even at rest).
@@ -243,7 +325,46 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       //                           than a uniformly tumbled blob of world.
       // The entire thing is windowed by `_falloff` so the boundary stays
       // continuous with the un-twisted world outside the radius.
-      `float _angle = _falloff * (${inputs.twistStrength} + ${inputs.time} * ${inputs.spinRate} + ${inputs.windings} * (_radial / _r));`,
+      // The base geometric angle (strength + time-driven spin + per-
+      // radius windings) is multiplied by `geometryAmount` so the
+      // caller can independently dial geometric twist from the tint
+      // animation below. At `geometryAmount = 0` splats stay put
+      // (perfect preservation of the SPZ's authored pattern), but
+      // the tint pass still animates because its phase reads
+      // `time × spinRate` directly. At 1.0 = the original behaviour.
+      //
+      // Defensive: every uniform that feeds `_angle` is wrapped in
+      // a finite-check that's portable to BOTH GLSL ES 1.00 and 3.00.
+      //
+      //   - NaN check : `x == x` is false ONLY for NaN. Available
+      //     in every GLSL version. Catches the realistic threat
+      //     (stale persisted state landing as NaN, partial migration
+      //     state during HMR).
+      //   - Inf check : `abs(x) < 1e30` is false for ±Infinity, true
+      //     for any finite value. Used instead of `isinf(x)` because
+      //     `isinf` is a GLSL ES 3.00 built-in that's NOT available
+      //     in GLSL ES 1.00 — using it makes the shader fail to
+      //     compile on WebGL 1 contexts, which traps the Spark WASM
+      //     worker on `unreachable` and prevents the entire SplatMesh
+      //     from initialising. The abs-comparison gets us identical
+      //     behaviour with universal portability.
+      //
+      // Without these, a single transient NaN propagates into
+      // `_angle`, then into the rotation quaternion, then into every
+      // splat's world-space centre. NaN centres break the splat
+      // sorter + tile coverage estimator, the GPU rasterises every
+      // tile each frame, and the tab wedges so hard the user can't
+      // refresh.
+      `float _safeStrength = (${inputs.twistStrength} == ${inputs.twistStrength} && abs(${inputs.twistStrength}) < 1e30) ? ${inputs.twistStrength} : 0.0;`,
+      `float _safeSpin = (${inputs.spinRate} == ${inputs.spinRate} && abs(${inputs.spinRate}) < 1e30) ? ${inputs.spinRate} : 0.0;`,
+      `float _safeWindings = (${inputs.windings} == ${inputs.windings} && abs(${inputs.windings}) < 1e30) ? ${inputs.windings} : 0.0;`,
+      `float _safeGeom = (${inputs.geometryAmount} == ${inputs.geometryAmount} && abs(${inputs.geometryAmount}) < 1e30) ? clamp(${inputs.geometryAmount}, 0.0, 1.0) : 0.0;`,
+      `float _safeTime = (${inputs.time} == ${inputs.time} && abs(${inputs.time}) < 1e30) ? ${inputs.time} : 0.0;`,
+      `float _safeFalloff = (_falloff == _falloff && abs(_falloff) < 1e30) ? _falloff : 0.0;`,
+      `float _angle = _safeFalloff * (_safeStrength + _safeTime * _safeSpin + _safeWindings * (_radial / _r)) * _safeGeom;`,
+      // Belt-and-suspenders: if the multiplication still managed to
+      // produce a NaN (shouldn't, but: floating-point), zero it.
+      `_angle = (_angle == _angle && abs(_angle) < 1e30) ? _angle : 0.0;`,
       `float _ha = 0.5 * _angle;`,
       // Axis-angle → quaternion. `_axis` is unit-length, so this is direct.
       `vec4 _q = vec4(_axis * sin(_ha), cos(_ha));`,
@@ -252,7 +373,15 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
       // Cheaper than building a 3×3 rotation matrix per splat.
       `vec3 _t = 2.0 * cross(_q.xyz, _local);`,
       `vec3 _rotated = _local + _q.w * _t + cross(_q.xyz, _t);`,
-      `${outputs.newCenter} = ${inputs.portalCenter} + _rotated;`,
+      // Final NaN backstop on the output centre. If any prior math
+      // managed to produce a NaN (e.g. _axis was a zero vector and
+      // normalize() returned NaN), fall back to the original
+      // unrotated splat centre. This is the single most important
+      // guard in the file: a NaN here corrupts the splat sorter and
+      // wedges the GPU. Without it, the page becomes un-refreshable
+      // and the user has to force-quit Chrome.
+      `vec3 _outRotated = (_rotated.x == _rotated.x && _rotated.y == _rotated.y && _rotated.z == _rotated.z) ? _rotated : _local;`,
+      `${outputs.newCenter} = ${inputs.portalCenter} + _outRotated;`,
       // Compose: newQuat = _q * existingQuat (Hamilton product). Without
       // this the Gaussian's principal axes would still point in their
       // original directions while their centres orbit — visually you'd see
@@ -338,6 +467,8 @@ export function makePortalTwist(initial?: PortalTwistInitial): PortalTwistContro
     strength: dStrength,
     spinRate: dSpinRate,
     windings: dWindings,
+    axialExtent: dAxialExtent,
+    geometryAmount: dGeometryAmount,
     enabled: dEnabled,
     tintEnabled: dTintEnabled,
     tintColor: dTintColor,
