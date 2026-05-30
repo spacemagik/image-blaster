@@ -29,7 +29,7 @@ import {
   type WizardTuning,
 } from './wizardTuning'
 import { SPARKLE_PRESETS, type SparklePreset } from '../splat/sparkle'
-import { useDebugStore } from '../../store/debug'
+import { useDebugStore, TONE_MAPPING_MODE_NAMES, type ToneMappingModeName } from '../../store/debug'
 import { wizardFeetPos } from './wizardState'
 
 const SPARKLE_PRESET_NAMES = Object.keys(SPARKLE_PRESETS) as SparklePreset[]
@@ -118,16 +118,173 @@ export function WizardGui() {
     )
 
     // ── Post-processing ──────────────────────────────────────────────────────
+    // Wired through `useDebugStore` (not `useWizardTuning`) — that's
+    // the store the PostProcessing component actually reads. The old
+    // `ppEnabled / ppBloomThreshold / ppBloomSmoothing / ppBrightness
+    // / ppContrast / ppVignetteDarkness / ppVignetteOffset` fields on
+    // wizardTuning are orphaned (never had a consumer); kept in the
+    // store for backwards compatibility but no GUI surface points at
+    // them anymore.
+    //
+    // Pattern: a `ppProxy` object snapshots the current effect store
+    // values, lil-gui binds to it, and each onChange handler calls
+    // the corresponding `useDebugStore` setter. A subscription at
+    // the bottom keeps ppProxy values in sync when other code (e.g.
+    // a preset, the Debug Panel) writes to the store, and refreshes
+    // the lil-gui display so the visible slider matches.
     const ppFolder = gui.addFolder('Post-processing')
-    tracked.push(
-      ppFolder.add(tAny, 'ppEnabled').name('Enabled').onChange(push('ppEnabled')),
-      ppFolder.add(tAny, 'ppBloomThreshold', 0, 1, 0.01).name('Bloom threshold').onChange(push('ppBloomThreshold')),
-      ppFolder.add(tAny, 'ppBloomSmoothing', 0, 1, 0.01).name('Bloom smoothing').onChange(push('ppBloomSmoothing')),
-      ppFolder.add(tAny, 'ppBrightness', -1, 1, 0.02).name('Brightness').onChange(push('ppBrightness')),
-      ppFolder.add(tAny, 'ppContrast', -1, 1, 0.02).name('Contrast').onChange(push('ppContrast')),
-      ppFolder.add(tAny, 'ppVignetteDarkness', 0, 1, 0.01).name('Vignette darkness').onChange(push('ppVignetteDarkness')),
-      ppFolder.add(tAny, 'ppVignetteOffset', 0, 1, 0.01).name('Vignette offset').onChange(push('ppVignetteOffset')),
-    )
+    const ppState0 = useDebugStore.getState()
+    const ppProxy = {
+      bloomEnabled: ppState0.bloomEnabled,
+      bloomIntensity: ppState0.bloomIntensity,
+      bloomThreshold: ppState0.bloomThreshold,
+      bloomSmoothing: ppState0.bloomSmoothing,
+      brightnessContrastEnabled: ppState0.brightnessContrastEnabled,
+      brightness: ppState0.brightness,
+      contrast: ppState0.contrast,
+      vignetteEnabled: ppState0.vignetteEnabled,
+      vignetteDarkness: ppState0.vignetteDarkness,
+      vignetteOffset: ppState0.vignetteOffset,
+      toneMappingEnabled: ppState0.toneMappingEnabled,
+      toneMappingMode: ppState0.toneMappingMode,
+      exposure: ppState0.exposure,
+      dofPostEnabled: ppState0.dofPostEnabled,
+      dofPostFocusDistance: ppState0.dofPostFocusDistance,
+      dofPostFocalLength: ppState0.dofPostFocalLength,
+      dofPostBokehScale: ppState0.dofPostBokehScale,
+      colorGradeEnabled: ppState0.colorGradeEnabled,
+      hue: ppState0.hue,
+      saturation: ppState0.saturation,
+      chromaticEnabled: ppState0.chromaticEnabled,
+      chromaticOffset: ppState0.chromaticOffset,
+      motionBlurEnabled: ppState0.motionBlurEnabled,
+      motionBlurStrength: ppState0.motionBlurStrength,
+    }
+    // Generic pusher: maps a proxy key to the matching setter
+    // (`bloomEnabled` → `setBloomEnabled`). Hand-typed for safety —
+    // a runtime symbol-stringify would lose TS coverage.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ppPush = (setterName: string) => (value: any) => {
+      const setter = (useDebugStore.getState() as unknown as Record<string, (v: unknown) => void>)[setterName]
+      if (typeof setter === 'function') setter(value)
+    }
+
+    const ppBloomFolder = ppFolder.addFolder('Bloom (glow on bright pixels)')
+    const ppBloomControls = [
+      ppBloomFolder.add(ppProxy, 'bloomEnabled').name('Enabled').onChange(ppPush('setBloomEnabled')),
+      // 0..3 covers "subtle rim glow" → "extreme plasma halo". The
+      // cosmic SPZ's tint pass writes emission ≈ 1.5 so 0.4 reads
+      // well; crank to 1+ for dramatic glow.
+      ppBloomFolder.add(ppProxy, 'bloomIntensity', 0, 3, 0.01).name('Intensity').onChange(ppPush('setBloomIntensity')),
+      ppBloomFolder.add(ppProxy, 'bloomThreshold', 0, 1, 0.01).name('Threshold').onChange(ppPush('setBloomThreshold')),
+      ppBloomFolder.add(ppProxy, 'bloomSmoothing', 0, 1, 0.01).name('Smoothing').onChange(ppPush('setBloomSmoothing')),
+    ]
+
+    const ppBCFolder = ppFolder.addFolder('Brightness / Contrast')
+    const ppBCControls = [
+      ppBCFolder.add(ppProxy, 'brightnessContrastEnabled').name('Enabled').onChange(ppPush('setBrightnessContrastEnabled')),
+      ppBCFolder.add(ppProxy, 'brightness', -1, 1, 0.01).name('Brightness').onChange(ppPush('setBrightness')),
+      ppBCFolder.add(ppProxy, 'contrast', -1, 1, 0.01).name('Contrast').onChange(ppPush('setContrast')),
+    ]
+
+    const ppVignetteFolder = ppFolder.addFolder('Vignette (dark corners)')
+    const ppVignetteControls = [
+      ppVignetteFolder.add(ppProxy, 'vignetteEnabled').name('Enabled').onChange(ppPush('setVignetteEnabled')),
+      ppVignetteFolder.add(ppProxy, 'vignetteDarkness', 0, 1, 0.01).name('Darkness').onChange(ppPush('setVignetteDarkness')),
+      ppVignetteFolder.add(ppProxy, 'vignetteOffset', 0, 1, 0.01).name('Offset').onChange(ppPush('setVignetteOffset')),
+    ]
+
+    const ppToneFolder = ppFolder.addFolder('Tone mapping')
+    const ppToneControls = [
+      ppToneFolder.add(ppProxy, 'toneMappingEnabled').name('Enabled').onChange(ppPush('setToneMappingEnabled')),
+      // Curve dropdown — selecting a different mode rebuilds the
+      // shader in PostProcessing (the curve is baked at construction
+      // time per the lib's design).
+      ppToneFolder.add(ppProxy, 'toneMappingMode', TONE_MAPPING_MODE_NAMES as readonly ToneMappingModeName[]).name('Curve').onChange(ppPush('setToneMappingMode')),
+      // Exposure is applied as a pre-curve multiply via
+      // renderer.toneMappingExposure. 0 = pitch black; 1 = neutral.
+      ppToneFolder.add(ppProxy, 'exposure', 0, 3, 0.01).name('Exposure (×)').onChange(ppPush('setExposure')),
+    ]
+
+    const ppDofFolder = ppFolder.addFolder('Depth of field (post)')
+    const ppDofControls = [
+      ppDofFolder.add(ppProxy, 'dofPostEnabled').name('Enabled').onChange(ppPush('setDofPostEnabled')),
+      // 0..1 normalised along near→far frustum. 0.02 ≈ subject ~ 5m
+      // away on a typical 50° FOV camera.
+      ppDofFolder.add(ppProxy, 'dofPostFocusDistance', 0, 1, 0.001).name('Focus distance').onChange(ppPush('setDofPostFocusDistance')),
+      ppDofFolder.add(ppProxy, 'dofPostFocalLength', 0, 1, 0.001).name('Focal length').onChange(ppPush('setDofPostFocalLength')),
+      // 0 = sharp everywhere, 10 = extreme bokeh. Increase
+      // gradually; high values are expensive (per-pixel disk
+      // gather).
+      ppDofFolder.add(ppProxy, 'dofPostBokehScale', 0, 10, 0.05).name('Bokeh scale').onChange(ppPush('setDofPostBokehScale')),
+    ]
+
+    const ppColorFolder = ppFolder.addFolder('Colour grade')
+    const ppColorControls = [
+      ppColorFolder.add(ppProxy, 'colorGradeEnabled').name('Enabled').onChange(ppPush('setColorGradeEnabled')),
+      // Hue rotation in radians. -π..+π = full wheel rotation.
+      ppColorFolder.add(ppProxy, 'hue', -Math.PI, Math.PI, 0.01).name('Hue (rad)').onChange(ppPush('setHue')),
+      // -1 = greyscale, 0 = neutral, +1 = saturation doubled.
+      ppColorFolder.add(ppProxy, 'saturation', -1, 1, 0.01).name('Saturation').onChange(ppPush('setSaturation')),
+    ]
+
+    const ppChromaFolder = ppFolder.addFolder('Chromatic aberration')
+    const ppChromaControls = [
+      ppChromaFolder.add(ppProxy, 'chromaticEnabled').name('Enabled').onChange(ppPush('setChromaticEnabled')),
+      ppChromaFolder.add(ppProxy, 'chromaticOffset', 0, 0.01, 0.0001).name('Offset (px-equiv)').onChange(ppPush('setChromaticOffset')),
+    ]
+
+    const ppMotionFolder = ppFolder.addFolder('Motion blur')
+    const ppMotionControls = [
+      ppMotionFolder.add(ppProxy, 'motionBlurEnabled').name('Enabled').onChange(ppPush('setMotionBlurEnabled')),
+      ppMotionFolder.add(ppProxy, 'motionBlurStrength', 0, 2, 0.01).name('Strength').onChange(ppPush('setMotionBlurStrength')),
+    ]
+
+    const ppAllControls = [
+      ...ppBloomControls,
+      ...ppBCControls,
+      ...ppVignetteControls,
+      ...ppToneControls,
+      ...ppDofControls,
+      ...ppColorControls,
+      ...ppChromaControls,
+      ...ppMotionControls,
+    ]
+    tracked.push(...ppAllControls)
+
+    // Sync proxy + slider display when the underlying store changes
+    // (e.g. another component flips bloomEnabled, or a hot-reload
+    // re-runs the migration). Without this the GUI's displayed
+    // values drift away from reality after external writes.
+    const unsubPP = useDebugStore.subscribe((s) => {
+      // Track every proxy key. Adding more is "add to ppProxy +
+      // copy-line here" — easy to keep in sync.
+      ppProxy.bloomEnabled = s.bloomEnabled
+      ppProxy.bloomIntensity = s.bloomIntensity
+      ppProxy.bloomThreshold = s.bloomThreshold
+      ppProxy.bloomSmoothing = s.bloomSmoothing
+      ppProxy.brightnessContrastEnabled = s.brightnessContrastEnabled
+      ppProxy.brightness = s.brightness
+      ppProxy.contrast = s.contrast
+      ppProxy.vignetteEnabled = s.vignetteEnabled
+      ppProxy.vignetteDarkness = s.vignetteDarkness
+      ppProxy.vignetteOffset = s.vignetteOffset
+      ppProxy.toneMappingEnabled = s.toneMappingEnabled
+      ppProxy.toneMappingMode = s.toneMappingMode
+      ppProxy.exposure = s.exposure
+      ppProxy.dofPostEnabled = s.dofPostEnabled
+      ppProxy.dofPostFocusDistance = s.dofPostFocusDistance
+      ppProxy.dofPostFocalLength = s.dofPostFocalLength
+      ppProxy.dofPostBokehScale = s.dofPostBokehScale
+      ppProxy.colorGradeEnabled = s.colorGradeEnabled
+      ppProxy.hue = s.hue
+      ppProxy.saturation = s.saturation
+      ppProxy.chromaticEnabled = s.chromaticEnabled
+      ppProxy.chromaticOffset = s.chromaticOffset
+      ppProxy.motionBlurEnabled = s.motionBlurEnabled
+      ppProxy.motionBlurStrength = s.motionBlurStrength
+      for (const c of ppAllControls) c.updateDisplay()
+    })
 
     // ── Background splat (Spark) ─────────────────────────────────────────────
     const splatFolder = gui.addFolder('Background splat (Spark)')
@@ -771,6 +928,7 @@ export function WizardGui() {
       unsubSplatPerfTuning()
       unsubSparkle()
       unsubPortal()
+      unsubPP()
       gui.destroy()
       guiRef.current = null
       // Suppress unused-tracked warning; refs kept to allow future updateDisplay() reset.

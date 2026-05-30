@@ -49,7 +49,34 @@ export function SplatRenderer({
     const viewerQuality = useDebugStore((s) => s.viewerQuality)
     const splatRef = useRef<SplatMesh>(null)
     const sparkRef = useRef<SparkRenderer>(null)
-    const encodeLinear = viewerQuality === ViewerQuality.High
+    // `encodeLinear` tells Spark to convert sRGB-encoded SPZ colour
+    // data to linear in the fragment shader BEFORE writing to the
+    // framebuffer. Three's renderer is configured with
+    // `outputColorSpace = SRGBColorSpace`, which means it expects
+    // shaders to write linear pixels and the renderer applies the
+    // sRGB gamma curve at output time.
+    //
+    // When `encodeLinear` is false, Spark writes the SPZ's sRGB
+    // bytes directly → the framebuffer ends up gamma-encoded → the
+    // renderer's output pass applies the gamma curve a SECOND time
+    // → roughly `pow(x, 0.45 * 0.45) = pow(x, 0.2)` instead of the
+    // intended `pow(x, 0.45)`. Result: midtones get lifted, deep
+    // shadows fade to grey, and saturation drops noticeably. Exactly
+    // the washed-out, low-contrast look users see on Low quality.
+    //
+    // It used to be gated on `viewerQuality === High` for what
+    // looked like a perf optimisation, but the actual cost is one
+    // GPU instruction per pixel of splat coverage — effectively
+    // free on any device that can render the SPZ at all. The lag
+    // on High comes from shadow map resolution + LOD splat count,
+    // NOT from this flag.
+    //
+    // Hard-coding to `true` means Low and High both render with
+    // correct gamma. The Low-quality perf wins still come from
+    // smaller shadow maps and aggressive LOD; they just no longer
+    // come with a colour-correctness penalty.
+    const encodeLinear = true
+    void viewerQuality
     const initialEncodeLinear = useRef(encodeLinear)
 
     // Live user-tunable splat offset + rotation (independent of world-manifest transform).

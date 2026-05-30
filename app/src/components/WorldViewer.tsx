@@ -351,7 +351,14 @@ export function WorldViewer({
           <SparkleScene />
           <PortalScene />
           <OriginHelper />
-          {isHighQuality && <PostProcessing />}
+          {/* PostProcessing wraps the ENTIRE scene render — splats,
+              GLB objects, character, sky/HDRI, sparkles, portal. Used
+              to be gated on `isHighQuality` so Low-quality viewers got
+              no effects at all; that gate is removed so the user's
+              GUI knobs always have a surface to act on. Individual
+              effects still no-op when their `Enabled` toggle is off,
+              which is the more granular cost control. */}
+          <PostProcessing />
         </Suspense>
       </Canvas>
       {uiVisible && activeControllerMode === 'wizard' && <WizardGui />}
