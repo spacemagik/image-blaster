@@ -287,10 +287,19 @@ export function PostProcessing() {
   useFrame(() => {
     const s = useDebugStore.getState()
 
-    // Bloom: intensity / threshold / smoothing all live-mutable via
-    // uniforms (the convolution shape is fixed at construction).
-    const intensityUniform = bloomEffect.uniforms.get('intensity')
-    if (intensityUniform) intensityUniform.value = s.bloomIntensity
+    // Bloom: intensity is exposed as a CLASS SETTER on BloomEffect,
+    // not the `intensity` uniform on the underlying material. In
+    // mipmap-blur mode (mipmapBlur: true) the mip pyramid path
+    // doesn't read from that uniform at all — assigning to it is a
+    // silent no-op, which is why the slider previously felt
+    // disconnected. Using the property setter routes the value
+    // through the lib's internal state and reaches the mip pyramid
+    // composite shader correctly.
+    //
+    // Threshold + smoothing remain on `luminanceMaterial` regardless
+    // of mip mode (they drive the bright-pixel mask that feeds both
+    // the traditional Gaussian path and the mip pyramid).
+    bloomEffect.intensity = s.bloomIntensity
     bloomEffect.luminanceMaterial.threshold = s.bloomThreshold
     bloomEffect.luminanceMaterial.smoothing = s.bloomSmoothing
 
@@ -378,7 +387,28 @@ export function PostProcessing() {
   ].join('|')
 
   return (
-    <EffectComposer key={effectKey} multisampling={0}>
+    <EffectComposer
+      key={effectKey}
+      multisampling={0}
+      // HALF_FLOAT render targets preserve HDR linear values through
+      // the effect chain instead of the @react-three/postprocessing
+      // default (UnsignedByteType) which clamps every pixel to [0,1]
+      // BEFORE the first effect runs. Without this:
+      //   - Spark splats with portalTintEmission = 1.5 get clipped
+      //     to 1.0 in the render target before bloom samples it.
+      //   - Bloom can't distinguish "truly emissive" (HDR > 1.0) from
+      //     "lit but not emissive" (LDR ~ 0.8) — both look the same
+      //     after clipping, so the threshold slider can't surface
+      //     the difference.
+      //   - ACES tone-mapping at the end of the chain operates on
+      //     already-LDR data, so its highlight shoulder does nothing.
+      // With HalfFloatType, bright pixels stay >1.0 through the
+      // pipeline, bloom's threshold becomes a meaningful HDR cutoff,
+      // and ACES does its actual job: compressing HDR overshoot
+      // back into displayable LDR after bloom has had a chance to
+      // distribute that energy.
+      frameBufferType={THREE.HalfFloatType}
+    >
       {/* Order matters — see top-of-file diagram. */}
       <OptionalEffect key="mb" enabled={motionBlurEnabled} object={blurEffect} />
       <OptionalEffect key="dof" enabled={dofPostEnabled} object={dofEffect} />
