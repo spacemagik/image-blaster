@@ -15,6 +15,7 @@ import { ButterflyScene } from '../modules/butterfly/ButterflyScene'
 import { ObjectGrid } from '../modules/scene/ObjectGrid'
 import { SparkleScene } from '../modules/sparkle/SparkleScene'
 import { PortalScene } from '../modules/portal/PortalScene'
+import { CreaturesScene } from '../modules/creatures/CreaturesScene'
 import { PlacementEditorOverlay, PlacementEditorScene, usePlacementEditor } from '../modules/scene/PlacementEditor'
 import { OriginHelper } from '../modules/scene/OriginHelper'
 import { AudioManager } from '../modules/audio/AudioManager'
@@ -350,6 +351,7 @@ export function WorldViewer({
           {butterfliesEnabled && <ButterflyScene />}
           <SparkleScene />
           <PortalScene />
+          <CreaturesScene />
           <OriginHelper />
           {/* PostProcessing wraps the ENTIRE scene render — splats,
               GLB objects, character, sky/HDRI, sparkles, portal. Used

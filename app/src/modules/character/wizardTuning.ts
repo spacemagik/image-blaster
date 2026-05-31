@@ -14,6 +14,11 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { SPARKLE_PRESETS, type SparklePreset } from '../splat/sparkle'
+import {
+  CREATURE_CONFIGS,
+  defaultCreatureTransforms,
+  type CreatureTransform,
+} from '../creatures/creatureConfigs'
 
 export type ColorRGB = [number, number, number]
 
@@ -421,6 +426,13 @@ export interface WizardTuning {
    *  region) but applied in the SPZ's LOCAL frame, so tilting the SPZ
    *  via the gizmo rotates the spin axis with it. 0 = no rigid spin. */
   portalRigidSpinRate: number
+
+  /** Per-creature TRS + visibility + gizmo state, keyed by the slugs in
+   *  `CREATURE_CONFIGS`. Stored as a record (rather than flat fields)
+   *  so adding a new creature is config-only and doesn't require a
+   *  schema bump — the migration seeds missing slugs from
+   *  `defaultCreatureTransforms()` on hydrate. */
+  creatures: Record<string, CreatureTransform>
 }
 
 export type SplatPerfPreset = 'performance' | 'balanced' | 'quality'
@@ -547,6 +559,11 @@ export interface WizardTuningStore extends WizardTuning {
   applySparklePreset: (preset: SparklePreset) => void
   /** Re-seed the full set of cosmic-swirl + tint fields from a named preset. */
   applyPortalLookPreset: (preset: PortalLookPreset) => void
+  /** Patch a single creature's transform. Merges into the existing record
+   *  (other creatures untouched) — exposed as a dedicated action so we
+   *  don't accidentally clobber the whole `creatures` record on a
+   *  partial update via `setTuning`. */
+  setCreatureTransform: (slug: string, partial: Partial<CreatureTransform>) => void
   resetToken: number
   bumpResetToken: () => void
 }
@@ -889,6 +906,8 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   // make the slab itself lag behind the player; particles still stay in
   // world space, but the *region* of visible particles drifts too).
   sparkleFollowSmoothing: 0,
+
+  creatures: defaultCreatureTransforms(),
 }
 
 export const useWizardTuning = create<WizardTuningStore>()(
@@ -901,6 +920,25 @@ export const useWizardTuning = create<WizardTuningStore>()(
       applySplatPerfPreset: (preset) => set(SPLAT_PERF_PRESETS[preset]),
       applySparklePreset: (preset) => set(sparklePresetToTuning(preset)),
       applyPortalLookPreset: (preset) => set(PORTAL_LOOK_PRESETS[preset]),
+      setCreatureTransform: (slug, partial) =>
+        set((s) => {
+          // Always seed from the registry's default first so a slug
+          // that the user has never touched still hydrates with a
+          // valid transform. Without this, patching a single field
+          // (e.g. `posX` from the gizmo) on a missing slug would
+          // produce `{ posX: 1.2 }` with nine `undefined`s — every
+          // downstream selector would then read NaN for the missing
+          // axes and the proxy group's matrix would corrupt.
+          const fallback = DEFAULT_WIZARD_TUNING.creatures[slug]
+          const existing = s.creatures[slug] ?? fallback
+          if (!existing) return s
+          return {
+            creatures: {
+              ...s.creatures,
+              [slug]: { ...existing, ...partial },
+            },
+          }
+        }),
       bumpResetToken: () => set((s) => ({ resetToken: s.resetToken + 1 })),
     }),
     {
@@ -954,7 +992,35 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // Smoothing default reverts to 0 since it's no longer needed as a
       // workaround (still exposed for users who want a deliberate "fog"
       // trailing feel).
-      version: 48,
+      // v49: introduces the `creatures` record (Verdant Guardian /
+      // Verdant Sentinel / Vinebound Sentinel GLBs). Stored as a
+      // `Record<slug, CreatureTransform>` so adding a new creature is
+      // config-only — the migration backfills any missing slugs from
+      // `defaultCreatureTransforms()` on hydrate, no schema bump
+      // required for future additions.
+      // v50: one-shot force-enable for all creatures, because users who
+      // hit the (now-removed) "Hide all creatures" panic button during
+      // the perf-debugging phase ended up with `enabled: false`
+      // persisted across reloads — and there was no way to recover
+      // without manually toggling each subfolder. We now make the GLBs
+      // cheap to render at load time (texture downscale + PBR strip in
+      // CreaturesScene.optimizeCreatureGltf), so the "panic hide" is
+      // no longer needed; this migration restores visibility one time
+      // so you don't have to re-enable each creature by hand.
+      //
+      // v51: pin every dyno/tint/spiral knob to a no-op value and seed
+      // `portalRigidSpinRate = 0.5` so the simplified Cosmic-swirl GUI
+      // ("Enable rotation" toggle, see WizardGui.tsx) has a single
+      // motion path it can drive. The dyno modifier in portalTwist.ts
+      // still attaches in PortalScene when `portalEnabled` is true, but
+      // every uniform it reads (twist strength, geometry amount,
+      // windings, tint colour mix) is now zero/off, so the shader is a
+      // pure pass-through. Cheaper than reworking the attach pipeline
+      // and lets us bring back the old controls later without another
+      // schema bump. `portalEnabled` itself is force-OFF so the dyno
+      // doesn't even attach by default — the rigid spin path is
+      // entirely independent of it.
+      version: 51,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1361,6 +1427,80 @@ export const useWizardTuning = create<WizardTuningStore>()(
           migrated.portalTintEmission = 1.5
           migrated.portalTintContrast = 2.0
         }
+        // v51: collapse the cosmic-swirl effect surface to ONE knob
+        // (rigid group-spin) and force every other motion/colour path
+        // off so they can't fight with each other. The simplified GUI
+        // exposes a single "Enable rotation" toggle that drives
+        // `portalRigidSpinRate` (0 ↔ 0.5 rad/s) — everything else
+        // below is held permanently at neutral so the dyno, tint, and
+        // spiral overlay are invisible regardless of where the user
+        // dropped them in earlier sessions. We use a one-shot
+        // `fromVersion < 51` block (not "always") because users may
+        // hand-edit the underlying fields again in the future.
+        if (fromVersion < 51) {
+          // Rigid spin: seed at the speed that was reported as
+          // "PERFECT" before the creatures regressed perf. The GUI
+          // toggle reads `> 0` to determine on/off, so any non-zero
+          // value works here — but 0.5 rad/s (~12.6 s per revolution)
+          // is the gentle, hypnotic rate the user committed at v47.
+          migrated.portalRigidSpinRate = 0.5
+          // Dyno: detach by default. With portalEnabled=false, the
+          // attach effect in PortalScene short-circuits and the
+          // worldModifier never gets pushed onto the SplatMesh — no
+          // wasted shader work, no risk of stale uniforms making the
+          // SPZ look weird.
+          migrated.portalEnabled = false
+          // Belt-and-braces: zero every dyno/tint/spiral uniform so
+          // that even if a future code path re-attaches the modifier,
+          // its shader body short-circuits to a pass-through. Each
+          // one is documented in detail at its store-field
+          // definition above.
+          migrated.portalStrength = 0
+          migrated.portalSpinRate = 0
+          migrated.portalGeometryAmount = 0
+          migrated.portalWindings = 0
+          migrated.portalTintEnabled = false
+          migrated.portalSpiralEnabled = false
+          // Hide the placement helpers that referenced removed GUI
+          // folders so they don't appear floating in the scene with
+          // no way to turn off.
+          migrated.portalShowSphere = false
+          migrated.portalGizmoEnabled = false
+          // Force gizmo target to 'splat' — 'region' was the other
+          // option but it's no longer reachable from the GUI.
+          migrated.portalGizmoTarget = 'splat'
+        }
+        // v49: introduce the `creatures` record. Older stores have no
+        // `creatures` field at all → CreaturesScene reads `undefined`,
+        // every per-slug selector falls back to NaN, and the proxy
+        // group's matrix corrupts the moment React tries to set
+        // `position.x = undefined`. Seed every slug from the registry's
+        // default transform so first paint already has valid TRS.
+        //
+        // Also ALWAYS backfill missing slugs (run on every hydrate, not
+        // just fromVersion < 49) so adding a new creature config later
+        // doesn't require another schema bump — the next page load
+        // just notices the gap and fills it from defaults.
+        const persistedCreatures =
+          (migrated.creatures && typeof migrated.creatures === 'object')
+            ? (migrated.creatures as Record<string, Partial<CreatureTransform>>)
+            : {}
+        const seededCreatures: Record<string, CreatureTransform> = {}
+        for (const config of CREATURE_CONFIGS) {
+          const persisted = persistedCreatures[config.slug] ?? {}
+          seededCreatures[config.slug] = {
+            ...config.defaultTransform,
+            ...persisted,
+            // v50: one-shot — preserve every other persisted field (pos,
+            // rot, scale, gizmo state) but force `enabled: true` so the
+            // user's three creatures are visible again after the panic
+            // "Hide all" button hid them. Only run on the v49→v50 hop
+            // so future user-driven hides aren't clobbered on every
+            // reload.
+            ...(fromVersion < 50 ? { enabled: true } : {}),
+          }
+        }
+        migrated.creatures = seededCreatures
         return migrated
       },
       partialize: (s) => {
@@ -1370,6 +1510,8 @@ export const useWizardTuning = create<WizardTuningStore>()(
           resetTuning: _reset,
           applySplatPerfPreset: _preset,
           applySparklePreset: _sparkle,
+          applyPortalLookPreset: _portal,
+          setCreatureTransform: _creature,
           bumpResetToken: _bump,
           ...rest
         } = s

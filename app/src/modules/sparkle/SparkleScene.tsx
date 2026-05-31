@@ -184,39 +184,37 @@ export function SparkleScene() {
     sparkle.setPosition(id, new THREE.Vector3(posX, posY, posZ))
   }, [posX, posY, posZ, proxy, followCharacter])
 
-  // ── Per-frame motion loop. Two independent layers run every frame:
+  // ── Per-frame motion loop. Two layers, both run every frame:
   //
-  //   1. SPAWN-BOX transform (`snow.position`) snaps to the player (or lerps,
-  //      if `sparkleFollowSmoothing > 0`) when `followCharacter` is on so
-  //      we always have particles around them. Skipped when off — the user
-  //      placed the slab manually and wants it to stay put.
-  //   2. PARTICLE drift inside the box is force-overridden every frame to
-  //      cancel the box's translation in world space. Without (2),
-  //      translating the box by Δ each frame translates all 8K particles
-  //      by Δ too — which reads as fake "snow-globe glued to the player"
-  //      motion. With (2) the particles only show their natural drift
-  //      (the GUI's Fall direction × velocity); the spawn box quietly
-  //      slides under them.
+  //   1. SPAWN-BOX transform (`snow.position`) snaps to the player (or
+  //      lerps if `sparkleFollowSmoothing > 0`) when `followCharacter`
+  //      is on. Skipped when off so the user can place the slab manually
+  //      and have it stay put.
+  //   2. PARTICLE drift is overridden every frame to keep the GUI's
+  //      Fall direction × velocity sliders live — without this, dragging
+  //      Velocity wouldn't take effect until the next full effect rebuild.
   //
-  //      Math: snowBox renders each particle at
-  //        world = snow.position + min + (max-min) * mod(hash + globalOffset, 1)
-  //      and advances globalOffset += fallDir × fallVel × dt. So:
-  //        d(world)/dt = d(snow.position)/dt + (max-min) × fallDir × fallVel
-  //      Want d(world)/dt = naturalWorldDrift, so:
-  //        effective worldDrift to pass = naturalWorldDrift − boxVelocity
-  //      and `Sparkle.setEffectiveDrift` does the divide-by-box-size + dyno
-  //      write. Always running this override (even when not following) is
-  //      idempotent — `boxVelocity` is zero when the box is stationary, so
-  //      the override just re-writes the natural drift each frame.
-  //      Bonus: this means the user's GUI fall-dir / fall-vel sliders take
-  //      effect on the very next frame without rebuilding the effect.
+  // Coupling between the two layers (was "counter-translation"):
+  //   In follow mode, the spawn box's translation is INHERITED by every
+  //   particle (snowBox's `world = snow.position + ...`). The previous
+  //   implementation cancelled that inheritance — subtracting box velocity
+  //   from the natural drift so particles stayed stationary in world space
+  //   ("walk through a snow globe"). That made particles appear to slide
+  //   backwards / sideways relative to the character whenever they moved,
+  //   which is the opposite of what users intuitively expect when they
+  //   toggle "Follow character" on.
   //
-  //   Smoothing only affects layer (1); layer (2) tracks whatever actual
-  //   velocity the box ends up with each frame (snap → instantaneous,
-  //   smoothed → eased), so the cancellation stays correct either way.
+  //   Now: in follow mode we write the natural drift DIRECTLY, no
+  //   subtraction. The box motion adds to particle motion, so particles
+  //   ride with the character — and their only motion *relative to the
+  //   character* is whatever the GUI sliders specify (typically purely
+  //   vertical via the default `Fall direction = (0, 1, 0)`).
+  //
+  //   When `followCharacter` is off the box is stationary, so box
+  //   velocity = 0 and the two formulations produce identical results.
+  //   We keep a single code path (always write natural drift) so the
+  //   behaviour stays simple to reason about.
   const _targetPos = useRef(new THREE.Vector3()).current
-  const _prevBoxPos = useRef<THREE.Vector3 | null>(null)
-  const _boxVel = useRef(new THREE.Vector3()).current
   const _naturalDrift = useRef(new THREE.Vector3()).current
   const _worldDrift = useRef(new THREE.Vector3()).current
   useFrame((_, dt) => {
@@ -243,23 +241,7 @@ export function SparkleScene() {
       sparkle.setPosition(id, proxy.position)
     }
 
-    // ── Layer 2: counter-translate particles so they stay in world space ─
-    // Read the live box position. In follow mode this is the (possibly
-    // smoothed) follow target; otherwise it's wherever the gizmo / sliders
-    // last placed it. We re-derive box velocity from frame-to-frame deltas
-    // rather than reading any "intended" velocity, so manual gizmo drags
-    // also get cancelled out cleanly.
-    const boxPos = proxy ? proxy.position : _targetPos
-    if (!_prevBoxPos.current) {
-      // First frame: seed previous so boxVel doesn't spike from a
-      // "snap-from-origin" delta and briefly hurl the particles backwards.
-      _prevBoxPos.current = boxPos.clone()
-      _boxVel.set(0, 0, 0)
-    } else if (dt > 0) {
-      _boxVel.copy(boxPos).sub(_prevBoxPos.current).divideScalar(dt)
-      _prevBoxPos.current.copy(boxPos)
-    }
-
+    // ── Layer 2: natural drift override (no counter-translation) ─────────
     // GUI sliders write raw direction values that may not be unit length;
     // normalise so magnitude semantics match the snowBox presets (where
     // direction is unit and fallVelocity carries the speed).
@@ -267,18 +249,17 @@ export function SparkleScene() {
     const naturalLen = _naturalDrift.length()
     if (naturalLen > 1e-9) _naturalDrift.divideScalar(naturalLen)
 
-    // naturalWorldDrift = boxSize × natural_dyno_drift. We then subtract
-    // boxVel to cancel the spawn-box translation, and hand the result to
-    // Sparkle which converts back to dyno space (dividing by boxSize)
-    // before writing fallDirection × fallVelocity.
+    // World-drift expressed in absolute m/s so Sparkle.setEffectiveDrift
+    // (which divides by boxSize internally to produce the dyno-space
+    // fallDirection × fallVelocity) reproduces the user's intended speed.
     const fallVelLive = t.sparkleFallVelocity
     const bx = t.sparkleRadius * 2
     const by = t.sparkleHeight * 2
     const bz = t.sparkleRadius * 2
     _worldDrift.set(
-      _naturalDrift.x * fallVelLive * bx - _boxVel.x,
-      _naturalDrift.y * fallVelLive * by - _boxVel.y,
-      _naturalDrift.z * fallVelLive * bz - _boxVel.z,
+      _naturalDrift.x * fallVelLive * bx,
+      _naturalDrift.y * fallVelLive * by,
+      _naturalDrift.z * fallVelLive * bz,
     )
     sparkle.setEffectiveDrift(id, _worldDrift)
   })
