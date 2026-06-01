@@ -24,7 +24,7 @@
  * meshes — and avoiding the skeleton clone shaves a few ms off first paint.
  */
 import { Suspense, useEffect, useRef, useState } from 'react'
-import { useLoader, useFrame } from '@react-three/fiber'
+import { useLoader, useFrame, useThree } from '@react-three/fiber'
 import { TransformControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
@@ -34,6 +34,19 @@ import {
   getActiveSplatMesh,
   subscribeActiveSplatMesh,
 } from '../splat/splatMeshRegistry'
+
+// ── Distance culling ────────────────────────────────────────────────────
+// Squared distance from camera beyond which a creature is hidden
+// outright (mesh.visible = false → zero draw calls, zero fragment work,
+// zero shadow rasterization). 30 m is roughly the spawn ring radius
+// for the five creatures + a little headroom; beyond that the wizard's
+// LoD splats and atmospheric depth swallow them visually anyway, so
+// hiding them is invisible in practice but reclaims a big chunk of GPU.
+// Squared form keeps the per-frame test as one subtract + dot product
+// per creature — no sqrt.
+const CREATURE_HIDE_DISTANCE = 30
+const CREATURE_HIDE_DIST_SQ = CREATURE_HIDE_DISTANCE * CREATURE_HIDE_DISTANCE
+const _creatureDistVec = new THREE.Vector3()
 
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
@@ -63,7 +76,16 @@ const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 // shared texture (GLTFLoader caches by URL → multiple instances share
 // material/texture refs, which is great: optimizing ONE references frees
 // VRAM for ALL clones).
-const MAX_CREATURE_TEX_SIZE = 1024
+// Texture cap: was 1024, dropped to 512 for the perf push on May 31
+// '26 18:27 PT. 512px halves the side length → quarters the texel count
+// → quarters the fragment shader work per sample AND quarters the VRAM
+// footprint across all five creatures (5 × multiple texture maps each).
+// At default spawn distances (10–25 m from the wizard) the texel-to-
+// pixel ratio still oversamples, so visible quality difference is
+// minimal; close-up inspection of a creature's surface will look
+// slightly softer than 1024 did. If the user wants the detail back we
+// can bump this to 768 (the midpoint compromise).
+const MAX_CREATURE_TEX_SIZE = 512
 const processedTextures = new WeakSet<THREE.Texture>()
 const optimizedRoots = new WeakSet<THREE.Object3D>()
 
@@ -166,6 +188,9 @@ function CreatureInstance({ config }: { config: CreatureConfig }) {
   const gizmoEnabled = useWizardTuning((s) => s.creatures[config.slug]?.gizmoEnabled ?? config.defaultTransform.gizmoEnabled)
   const gizmoMode = useWizardTuning((s) => s.creatures[config.slug]?.gizmoMode ?? config.defaultTransform.gizmoMode)
 
+  // Read once — `camera` is stable for the component's lifetime.
+  const camera = useThree((s) => s.camera)
+
   // The proxy group needs to be in component state (not just a ref) so
   // <TransformControls object={…}/> can react to its mount — passing a
   // ref's `.current` to a prop is a common foot-gun (React only reads
@@ -196,16 +221,35 @@ function CreatureInstance({ config }: { config: CreatureConfig }) {
   // the store mid-drag the gizmo would fight itself).
   useFrame(() => {
     if (!proxy) return
-    if (draggingRef.current) return
-    const t = useWizardTuning.getState().creatures[config.slug]
-    if (!t) return
-    proxy.position.set(t.posX, t.posY, t.posZ)
-    proxy.rotation.set(
-      THREE.MathUtils.degToRad(t.rotX),
-      THREE.MathUtils.degToRad(t.rotY),
-      THREE.MathUtils.degToRad(t.rotZ),
-    )
-    proxy.scale.setScalar(t.scale)
+    if (!draggingRef.current) {
+      const t = useWizardTuning.getState().creatures[config.slug]
+      if (!t) return
+      proxy.position.set(t.posX, t.posY, t.posZ)
+      proxy.rotation.set(
+        THREE.MathUtils.degToRad(t.rotX),
+        THREE.MathUtils.degToRad(t.rotY),
+        THREE.MathUtils.degToRad(t.rotZ),
+      )
+      proxy.scale.setScalar(t.scale)
+    }
+    // Distance culling: hide the entire creature subtree when it's
+    // beyond CREATURE_HIDE_DISTANCE from the camera. `visible = false`
+    // makes Three.js skip the whole branch — no transform updates,
+    // no material activation, no draw call. Way cheaper than per-mesh
+    // frustum culling because we don't even traverse children.
+    //
+    // Reads `proxy.position` directly (not `matrixWorld`) because the
+    // CreaturesScene mounts as an untransformed sibling in WorldViewer
+    // — proxy.position IS the world position, and reading it skips
+    // both the matrix-decompose AND the "is matrixWorld up to date"
+    // ordering hazard (matrixWorld updates during render, after
+    // useFrame, so it can lag by one frame).
+    //
+    // Force-visible while dragging so the gizmo can still latch onto
+    // a moving proxy at any distance the user drags it to.
+    _creatureDistVec.copy(proxy.position).sub(camera.position)
+    const tooFar = _creatureDistVec.lengthSq() > CREATURE_HIDE_DIST_SQ
+    proxy.visible = !tooFar || draggingRef.current
   })
 
   // Mirror gizmo edits back to the persisted store. TransformControls
