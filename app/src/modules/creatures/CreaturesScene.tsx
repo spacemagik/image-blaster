@@ -38,13 +38,16 @@ import {
 // ── Distance culling ────────────────────────────────────────────────────
 // Squared distance from camera beyond which a creature is hidden
 // outright (mesh.visible = false → zero draw calls, zero fragment work,
-// zero shadow rasterization). 30 m is roughly the spawn ring radius
-// for the five creatures + a little headroom; beyond that the wizard's
-// LoD splats and atmospheric depth swallow them visually anyway, so
-// hiding them is invisible in practice but reclaims a big chunk of GPU.
-// Squared form keeps the per-frame test as one subtract + dot product
-// per creature — no sqrt.
-const CREATURE_HIDE_DISTANCE = 30
+// zero shadow rasterization). Bumped from 30 → 200 m because at 30 m
+// the cull was popping creatures in/out as the camera moved away from
+// the spawn cluster, and the user explicitly wanted them visible at
+// long range. 200 m comfortably exceeds the world's typical view
+// distance (camera+fog usually swallow geometry by ~120 m), so this
+// only culls truly-offscreen creatures that we might add later for
+// distant scenery; existing creatures stay visible throughout normal
+// play. Per-frame cost is still just one subtract + dot product per
+// creature, so widening the radius doesn't change the math.
+const CREATURE_HIDE_DISTANCE = 200
 const CREATURE_HIDE_DIST_SQ = CREATURE_HIDE_DISTANCE * CREATURE_HIDE_DISTANCE
 const _creatureDistVec = new THREE.Vector3()
 
@@ -342,25 +345,96 @@ function CreatureModel({ url, label }: { url: string; label: string }) {
  * with an empty scene.
  *
  * The fix: subscribe to `splatMeshRegistry`, which Spark notifies once
- * the world splat's `initialized` promise resolves. We then wait an
- * extra ~1.5 s so the GPU has time to upload the decoded splats and
- * settle before we start dropping creature textures into the same VRAM
- * pool. After that grace period the creatures mount as before.
+ * the world splat's `initialized` promise resolves. We then wait a
+ * short grace period so the GPU has time to upload the decoded splats
+ * before we start dropping creature textures into the same VRAM pool.
+ * After the grace the creatures mount as before.
+ *
+ * Grace tuning history:
+ *   - Was 1500 ms while the app had no title/start screen, so any
+ *     extra buffer was directly visible as "the world appears
+ *     empty after the splat resolves".
+ *   - Dropped to 200 ms once the StartScreen overlay was added.
+ *     The start screen now masks both the splat decode AND the
+ *     creature GLB download — by the time the user clicks PLAY,
+ *     200 ms more vs 1500 ms more is irrelevant because everything
+ *     is already mounted underneath. 200 ms is still enough buffer
+ *     to avoid the WASM race on cold loads.
  *
  * On URL changes (e.g. user switches worlds) Spark sets the active
  * mesh back to `null` BEFORE the new mesh loads — we keep the
  * creatures up during that gap because tearing them down would force
- * a re-parse of all three GLBs every world switch. The new world's
- * splat decode is the bottleneck again, but Spark seems to handle
- * that better than the first-load case (the GLBs and their decoded
+ * a re-parse of all GLBs every world switch. The new world's splat
+ * decode is the bottleneck again, but Spark seems to handle that
+ * better than the first-load case (the GLBs and their decoded
  * textures already live in VRAM by then).
  */
-const STARTUP_GRACE_MS = 1500
+const STARTUP_GRACE_MS = 200
+
+/**
+ * Track whether we've already kicked off the creature-GLB preload pass
+ * for this tab session. The preload is a one-shot: once the GLBs are
+ * in the r3f loader cache, every `useLoader(GLTFLoader, url)` call
+ * resolves synchronously from cache, so re-running the preload would
+ * just be wasted work + spurious console noise.
+ */
+let creaturePreloadStarted = false
+
+/**
+ * Kick off background downloads of every creature GLB the moment this
+ * function is called, without mounting any components. This lets the
+ * "hands of the forest" (52 MB) and the "verdant sentinel" (66 MB)
+ * start streaming from the network during the StartScreen — which the
+ * user often sees for 5–15 seconds — instead of waiting until after
+ * they click PLAY *and* the world splat is ready.
+ *
+ * Why preload doesn't reintroduce the WASM crash:
+ *   The crash was specifically a memory-allocation race when the GLB
+ *   parser tried to materialise textures while Spark's WASM decoder
+ *   was mid-resize of its splat buffer. Network downloads alone don't
+ *   trigger that — they just deposit ArrayBuffers into JS heap. The
+ *   subsequent parse step (which DOES allocate textures) is queued by
+ *   GLTFLoader internally and happens whenever the worker thread gets
+ *   to it; with five GLBs queued and only one or two browser worker
+ *   threads, parsing is naturally serialized, which is exactly what
+ *   the old `STARTUP_GRACE_MS = 1500` buffer was approximating
+ *   manually.
+ *
+ * Idempotent — safe to call from multiple component mounts.
+ */
+function preloadCreatureGltfs() {
+  if (creaturePreloadStarted) return
+  creaturePreloadStarted = true
+  for (const config of CREATURE_CONFIGS) {
+    // useLoader.preload(Loader, input) is the documented R3F static
+    // for cache-warming. Returns void; failures are logged but not
+    // thrown (preload is best-effort — if the network blip means
+    // the GLB isn't cached, useLoader's eventual call will retry).
+    useLoader.preload(GLTFLoader, config.url)
+  }
+  console.log(
+    `[Creatures] preloading ${CREATURE_CONFIGS.length} GLBs during startup`,
+  )
+}
 
 export function CreaturesScene() {
   const [worldReady, setWorldReady] = useState(
     () => getActiveSplatMesh() !== null,
   )
+
+  // Eager network preload — runs on first mount (before the world
+  // splat is necessarily ready) so the big GLBs ("hands of the
+  // forest" at 52 MB, "verdant sentinel" at 66 MB) are downloading
+  // in parallel with the splat decode rather than waiting for it
+  // to finish. By the time `worldReady` flips true, the GLB
+  // ArrayBuffers are usually already in cache and mounting is
+  // near-instant. Without this, you click PLAY → world appears →
+  // tiny creatures appear → and then the hands pops in a full
+  // 5–15 s later. See comment on preloadCreatureGltfs for why this
+  // doesn't reintroduce the WASM crash.
+  useEffect(() => {
+    preloadCreatureGltfs()
+  }, [])
 
   useEffect(() => {
     if (worldReady) return

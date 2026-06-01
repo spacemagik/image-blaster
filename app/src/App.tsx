@@ -4,6 +4,7 @@ import { WorldViewer } from './components/WorldViewer'
 import { WorldSidebar } from './components/WorldSidebar'
 import { BottomLeftControls, ViewerModeHotkeys } from './components/BottomLeftControls'
 import { TouchControls } from './components/TouchControls'
+import { StartScreen } from './components/StartScreen'
 import { useSceneProject } from './modules/scene/useSceneProject'
 import { fetchWorlds, loadWorlds } from './utils/worldLoader'
 import { useDebugStore } from './store/debug'
@@ -73,6 +74,17 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
   const playMode = useDebugStore((s) => s.playMode)
   const togglePlayMode = useDebugStore((s) => s.togglePlayMode)
   const setPlayMode = useDebugStore((s) => s.setPlayMode)
+  // StartScreen gate. Defaults to "showing" on initial mount — the
+  // user has to click PLAY before the title overlay disappears. We
+  // intentionally do NOT persist this in the debug store: a fresh
+  // page load should always start at the title, never drop the user
+  // straight into the world. The WorldViewer still MOUNTS under the
+  // overlay so heavy assets (SPZ + creature GLBs) can decode while
+  // the user is reading the title.
+  //
+  // Skipped in `/edit` routes so the placement editor still opens
+  // directly to its tools (editing through a title screen is silly).
+  const [started, setStarted] = useState(false)
   const [location] = useLocation()
   const [sceneProjectEnabled, setSceneProjectEnabled] = useState(true)
   const [selectedWorldVersions, setSelectedWorldVersions] = useState<Record<string, number>>({})
@@ -225,6 +237,17 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
           Exit play mode
           <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-white/70">esc</span>
         </button>
+      )}
+      {/* Title screen — sits ABOVE the WorldViewer but BELOW the dev
+       *  Leva/Debug panels (z-50 vs Leva's higher z) so we can still
+       *  watch perf metrics while we look at the title. Hidden in
+       *  the placement editor (`/:slug/edit`) because editing through
+       *  a title screen would be silly and would block the editor UI
+       *  on first paint. Once the user clicks PLAY we unmount the
+       *  overlay entirely — the StartScreen's own fade-out CSS
+       *  handles the visual transition before we drop it. */}
+      {!editing && !started && (
+        <StartScreen onStart={() => setStarted(true)} />
       )}
     </div>
   )

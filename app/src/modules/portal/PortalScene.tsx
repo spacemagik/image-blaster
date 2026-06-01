@@ -546,12 +546,19 @@ export function PortalScene() {
     })
   }
 
-  // Only render the helper sphere when the portal is meaningfully active —
-  // either the twist itself is on, or the user has the gizmo enabled to
-  // place it. Otherwise the translucent purple bubble at world origin (the
-  // default position) looks like a bug to anyone who hasn't opened the
-  // Portal twist folder yet.
-  const showSphere = portalShowSphere && (portalEnabled || portalGizmoEnabled)
+  // Helper ellipsoid is permanently hidden — the translucent purple
+  // bubble was a leftover debug visualizer from the portal-twist tuning
+  // phase, and even with the v55 store migration setting
+  // `portalShowSphere=false` it kept reappearing because the GUI
+  // checkbox is still wired up and any stray state-write toggled it on.
+  // The underlying region proxy (region position) is preserved so
+  // anything reading the falloff centre still works; we just never
+  // render its visualisation. To bring it back for debugging, swap this
+  // back to `portalShowSphere && (portalEnabled || portalGizmoEnabled)`.
+  const showSphere = false
+  void portalShowSphere // keep selector subscribed (no-op) so future toggles update wirelessly
+  void portalEnabled
+  void portalGizmoEnabled
 
   // ── Helper transform: ellipsoid scaled (radius × radius × axialExtent
   // × radius) so the user sees the ACTUAL disk-shaped falloff region

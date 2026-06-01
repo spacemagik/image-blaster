@@ -1058,7 +1058,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // max out at 1.0 LDR — right at the bloom threshold — so
       // bloom looked broken once the cosmic-SPZ tint pass was
       // disabled in v51. See `splatGain.ts` for the modifier impl.
-      version: 55,
+      version: 56,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1577,6 +1577,17 @@ export const useWizardTuning = create<WizardTuningStore>()(
             // so future user-driven hides aren't clobbered on every
             // reload.
             ...(fromVersion < 50 ? { enabled: true } : {}),
+            // v56: same one-shot re-enable as v50, prompted by the user
+            // explicitly asking "please add the characters back" on
+            // May 31 '26 18:49 — none were visible because the 30 m
+            // distance cull was hiding them whenever the camera moved
+            // off the spawn cluster. The cull was widened to 200 m in
+            // CreaturesScene.tsx, but if any creature's `enabled` was
+            // also flipped off in the GUI it would still vanish; this
+            // sweep flips all of them back on once so the user starts
+            // from a known-visible state. As with v50, this is a
+            // one-shot — future GUI hides won't be clobbered.
+            ...(fromVersion < 56 ? { enabled: true } : {}),
           }
         }
         migrated.creatures = seededCreatures
