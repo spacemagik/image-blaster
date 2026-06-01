@@ -146,11 +146,15 @@ export function PostProcessing() {
       //      bleeds into surrounding pixels keeps the *halo*
       //      visible even after compression.
       //
-      // resolutionScale 0.5 gives crisper bloom contours than
-      // 0.35 at a small perf cost (the mip pyramid does most of
-      // the spreading; we don't need to under-sample the input).
+      // resolutionScale 0.35 is the sweet spot for this scene:
+      // halves the GPU bandwidth vs 0.5 (which had been the prior
+      // setting tuned for a smaller world) and the mipmap pyramid
+      // hides the lower base resolution by spreading the glow
+      // across multiple mip levels — the contour is still smooth.
+      // Combined with disabling motion blur, this is the main lever
+      // for the "SUPER laggy" fix from May 31 '26 16:08 PT.
       mipmapBlur: true,
-      resolutionScale: 0.5,
+      resolutionScale: 0.35,
     })
   }, [])
 

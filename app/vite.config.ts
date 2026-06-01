@@ -144,7 +144,9 @@ function worldsPlugin(): Plugin {
   const WORLD_CHANGE_EVENT = 'worlds-changed'
   const repoRoot = path.resolve(__dirname, '..')
   const worldsDir = path.resolve(__dirname, '../worlds')
-  const RESERVED_OUTPUT_DIRS = new Set(['world', 'sfx'])
+  const RESERVED_OUTPUT_DIRS = new Set(['world', 'sfx', 'extras'])
+  const EXTRAS_DIR = 'extras'
+  const SPLAT_EXTENSIONS = new Set(['.spz'])
   const MODEL_EXTENSIONS = new Set(['.glb'])
   const AUDIO_EXTENSIONS = new Set(['.mp3', '.ogg', '.wav', '.m4a', '.opus'])
   const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif'])
@@ -278,6 +280,17 @@ function worldsPlugin(): Plugin {
 
   function readWorldSfxUrls(slug: string) {
     return readSfxUrls(slug, path.join('output', 'sfx'))
+  }
+
+  function readExtraSplats(slug: string) {
+    const extrasDir = path.join(worldsDir, slug, 'output', EXTRAS_DIR)
+    if (!fs.existsSync(extrasDir) || !fs.statSync(extrasDir).isDirectory()) return []
+    return visibleFiles(extrasDir)
+      .filter((file) => SPLAT_EXTENSIONS.has(path.extname(file.name).toLowerCase()))
+      .map((file) => ({
+        url: worldsUrl(slug, path.join('output', EXTRAS_DIR, file.name)),
+        name: path.basename(file.name, path.extname(file.name)),
+      }))
   }
 
   function worldAssetUrl(slug: string, filename?: string) {
@@ -862,8 +875,114 @@ function worldsPlugin(): Plugin {
   }
 }
 
+/**
+ * spzRangePlugin — make Vite's dev server speak proper HTTP byte ranges for
+ * the giant `.spz` world splats.
+ *
+ * Why we need this: Spark 2.1's LoD-paged splat loader reads a tiny header
+ * from the SPZ first to learn the file layout, then streams pages on demand
+ * via `Range` requests. Vite's built-in static handler ignores `Range`
+ * headers and returns HTTP 200 with the FULL body (or, worse, aborts the
+ * connection after a few bytes when the client cancels). When that header
+ * probe doesn't come back as a `206 Partial Content`, Spark gives up and
+ * never resumes — symptoms are: the SPZ network entry shows
+ * `encoded=0, transferred=300`, nothing renders in the scene, no obvious
+ * console error.
+ *
+ * Fix: intercept GET/HEAD for `*.spz` ourselves BEFORE Vite's static layer,
+ * read the requested byte range off disk, and write back a clean
+ * `206 Partial Content` (or `200` if no range was asked for). Streams the
+ * slice instead of loading the whole 300+ MB into RAM.
+ *
+ * Production note: this only runs under `vite dev`. In a prod build the
+ * SPZs are served by whatever real CDN/static host the app deploys to,
+ * which (unlike Vite dev) already handles `Range` correctly.
+ */
+function spzRangePlugin(): Plugin {
+  const publicDir = path.resolve(__dirname, 'public')
+  // The actual range handler — extracted so we can register it via PREPEND
+  // below (Vite's built-in `viteServePublicMiddleware` would otherwise win
+  // the race for `.spz` requests and answer with a non-ranged HTTP 200).
+  const handle = (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    req: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    res: any,
+    next: () => void,
+  ) => {
+    if (!req.url || (req.method !== 'GET' && req.method !== 'HEAD')) return next()
+    // Strip querystring and decode percent-encoded path segments before
+    // touching the filesystem — without this `%20` etc. in world slugs
+    // would fail to resolve.
+    const cleanUrl = decodeURIComponent(req.url.split('?')[0])
+    if (!cleanUrl.endsWith('.spz')) return next()
+    const filePath = path.join(publicDir, cleanUrl)
+    // Defence-in-depth: keep us inside `public/` so a crafted `..` URL
+    // can't read arbitrary files off disk.
+    if (!filePath.startsWith(publicDir + path.sep) && filePath !== publicDir) return next()
+    fs.stat(filePath, (statErr, stats) => {
+      if (statErr || !stats.isFile()) return next()
+      const total = stats.size
+      const range = req.headers.range
+      // Common headers — `Accept-Ranges: bytes` tells the client we
+      // honour range requests on subsequent fetches (Spark looks for
+      // this header to decide whether to attempt LoD paging).
+      res.setHeader('Accept-Ranges', 'bytes')
+      res.setHeader('Content-Type', 'application/octet-stream')
+      res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate')
+      if (req.method === 'HEAD') {
+        res.statusCode = 200
+        res.setHeader('Content-Length', String(total))
+        return res.end()
+      }
+      if (!range) {
+        res.statusCode = 200
+        res.setHeader('Content-Length', String(total))
+        fs.createReadStream(filePath).pipe(res)
+        return
+      }
+      // Parse the `bytes=start-end` syntax. `end` is optional and
+      // defaults to last byte; `start` is required. Multi-range
+      // requests (`bytes=0-99,200-299`) are not supported — Spark
+      // never sends them, and serving multipart/byteranges adds
+      // complexity for zero gain here.
+      const m = /^bytes=(\d+)-(\d+)?$/.exec(range)
+      if (!m) {
+        res.statusCode = 416 // Range Not Satisfiable
+        res.setHeader('Content-Range', `bytes */${total}`)
+        return res.end()
+      }
+      const start = parseInt(m[1], 10)
+      const end = m[2] ? Math.min(parseInt(m[2], 10), total - 1) : total - 1
+      if (Number.isNaN(start) || start > end || start >= total) {
+        res.statusCode = 416
+        res.setHeader('Content-Range', `bytes */${total}`)
+        return res.end()
+      }
+      res.statusCode = 206
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`)
+      res.setHeader('Content-Length', String(end - start + 1))
+      fs.createReadStream(filePath, { start, end }).pipe(res)
+    })
+  }
+  return {
+    name: 'spz-range',
+    configureServer(server: ViteDevServer) {
+      // PREPEND, don't append. Vite installs `viteServePublicMiddleware`
+      // (the sirv-based static handler for everything in `public/`) BEFORE
+      // any plugin's `configureServer` runs. Using `server.middlewares.use`
+      // would put us at the END of the chain, after that static handler has
+      // already written the response — meaning we'd never see `.spz` GETs.
+      // Splicing onto `middlewares.stack` directly is the only way to win
+      // the race for these requests.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server.middlewares as any).stack.unshift({ route: '', handle })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), worldsPlugin()],
+  plugins: [react(), worldsPlugin(), spzRangePlugin()],
   server: {
     fs: { allow: ['..'] },
     // Polling-based file watcher. Native fsevents on macOS sometimes silently

@@ -30,6 +30,10 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import { useWizardTuning } from '../character/wizardTuning'
 import { CREATURE_CONFIGS, type CreatureConfig } from './creatureConfigs'
+import {
+  getActiveSplatMesh,
+  subscribeActiveSplatMesh,
+} from '../splat/splatMeshRegistry'
 
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
@@ -283,7 +287,71 @@ function CreatureModel({ url, label }: { url: string; label: string }) {
   return <primitive object={scene.current} dispose={null} />
 }
 
+/**
+ * Gate the entire creature mount on "world splat is ready". Without this
+ * gate, the GLBLoader fetches + parses 100+ MB of GLB while the world
+ * SPZ is still decoding in Spark's WASM worker — and on systems with a
+ * tight tab heap budget that race trips a WASM `unreachable` trap
+ * inside Spark's decoder (visible in console as
+ * `SplatRenderer: splat mesh failed to initialize` with a giant base64
+ * `data:application/wasm` URL in the stack), which leaves the user
+ * with an empty scene.
+ *
+ * The fix: subscribe to `splatMeshRegistry`, which Spark notifies once
+ * the world splat's `initialized` promise resolves. We then wait an
+ * extra ~1.5 s so the GPU has time to upload the decoded splats and
+ * settle before we start dropping creature textures into the same VRAM
+ * pool. After that grace period the creatures mount as before.
+ *
+ * On URL changes (e.g. user switches worlds) Spark sets the active
+ * mesh back to `null` BEFORE the new mesh loads — we keep the
+ * creatures up during that gap because tearing them down would force
+ * a re-parse of all three GLBs every world switch. The new world's
+ * splat decode is the bottleneck again, but Spark seems to handle
+ * that better than the first-load case (the GLBs and their decoded
+ * textures already live in VRAM by then).
+ */
+const STARTUP_GRACE_MS = 1500
+
 export function CreaturesScene() {
+  const [worldReady, setWorldReady] = useState(
+    () => getActiveSplatMesh() !== null,
+  )
+
+  useEffect(() => {
+    if (worldReady) return
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const promote = () => {
+      if (timer || cancelled) return
+      timer = setTimeout(() => {
+        if (cancelled) return
+        console.log('[Creatures] world splat ready, mounting GLBs')
+        setWorldReady(true)
+      }, STARTUP_GRACE_MS)
+    }
+
+    // Synchronous check — covers the case where the splat is
+    // already loaded before this effect runs (e.g. HMR after an
+    // initial successful load).
+    if (getActiveSplatMesh()) {
+      promote()
+    }
+    const unsubscribe = subscribeActiveSplatMesh((mesh) => {
+      if (mesh) promote()
+    })
+
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
+  }, [worldReady])
+
+  if (!worldReady) return null
+
   return (
     <>
       {CREATURE_CONFIGS.map((config) => (

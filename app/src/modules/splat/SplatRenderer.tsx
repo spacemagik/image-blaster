@@ -1,6 +1,7 @@
 import { useMemo, useRef, useEffect, useState, useCallback } from 'react'
 import { extend, useThree, useFrame } from '@react-three/fiber'
 import { SplatMesh, SparkRenderer } from '@sparkjsdev/spark'
+import { makeSplatGain, type SplatGainHandle } from './splatGain'
 import { TransformControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { useDebugStore } from '../../store/debug'
@@ -182,6 +183,17 @@ export function SplatRenderer({
         spark.maxStdDev = v
         if (u.maxStdDev) u.maxStdDev.value = v
       })
+      // Splat brightness gain — push bright splat pixels into HDR so
+      // bloom can pick them up (see splatGain.ts). NaN-guarded
+      // because the slider can produce 0/0 mid-drag on some browsers
+      // and the dyno shader would propagate that NaN into every
+      // splat colour. Falls back to 1.0 (no boost) if invalid.
+      const rawGain = t.splatBrightness
+      const safeGain = (typeof rawGain === 'number' && Number.isFinite(rawGain)) ? rawGain : 1.0
+      setIfChanged('splatBrightness', safeGain, (v) => {
+        const gain = splatGainRef.current
+        if (gain) gain.gain.value = v
+      })
     })
 
     useEffect(() => {
@@ -207,6 +219,19 @@ export function SplatRenderer({
     // post-init step, which is the *re-create after edits* API; doing it
     // that way forced Spark to re-parse all 21M splats a second time
     // after load, adding many seconds of main-thread stall.)
+    // Splat-gain modifier: a tiny worldModifier whose only job is to
+    // multiply every splat's RGB by `splatBrightness`. We need it to
+    // make bloom visible on the SPZ — without it, the brightest splat
+    // pixels sit at LDR 1.0 (right at the bloom threshold), so the
+    // composer's bloom pass has almost nothing to glow on. Created
+    // once per component lifetime (the dyno compile is expensive).
+    // Gain value is driven from the store inside the per-frame loop
+    // below.
+    const splatGainRef = useRef<SplatGainHandle | null>(null)
+    if (!splatGainRef.current) {
+      splatGainRef.current = makeSplatGain(useWizardTuning.getState().splatBrightness ?? 1.5)
+    }
+
     useEffect(() => {
       const mesh = splatRef.current
       if (!mesh) return
@@ -231,6 +256,19 @@ export function SplatRenderer({
             lodSplatsLen: packed?.lodSplats?.numSplats ?? packed?.lodSplats?.length,
             meshEnableLod: mesh.enableLod,
           })
+          // Attach the splat-gain modifier ONCE the mesh's
+          // initialization promise resolves — Spark's docs are
+          // explicit that touching `worldModifier` before
+          // `initialized` finishes can race the source compile and
+          // wedge the dyno pipeline (the same failure mode portal
+          // twist guards against).
+          const gain = splatGainRef.current
+          if (gain) {
+            gain.attach(mesh)
+            console.log('[Spark] splat-gain attached', {
+              gain: gain.gain.value,
+            })
+          }
           setActiveSplatMesh(mesh)
         })
         .catch((err: unknown) => {
@@ -238,6 +276,8 @@ export function SplatRenderer({
         })
       return () => {
         cancelled = true
+        const gain = splatGainRef.current
+        if (gain && mesh) gain.detach(mesh)
         setActiveSplatMesh(null)
       }
     }, [url])

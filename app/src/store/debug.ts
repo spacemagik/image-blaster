@@ -199,7 +199,15 @@ export const useDebugStore = create<DebugStore>()(
       setControllerMode: (controllerMode) => set({ controllerMode }),
       flyMouseSensitivity: 0.003,
       setFlyMouseSensitivity: (flyMouseSensitivity) => set({ flyMouseSensitivity }),
-      dofEnabled: true,
+      // v21: was true. This is the SPLAT-RENDERER depth of field (a
+      // per-splat shader cost that runs on every one of the world's
+      // ~21M splats whenever viewerQuality === High). On most scenes
+      // the effect is subtle, but the per-splat math is one of the
+      // biggest contributors to "SUPER laggy" frame times reported
+      // on May 31 '26 16:32 PT. Default off so the splat shader
+      // short-circuits the focal/aperture math entirely; the GUI
+      // toggle is still wired so users can opt back in.
+      dofEnabled: false,
       setDofEnabled: (dofEnabled) => set({ dofEnabled }),
       focalDistance: 5,
       setFocalDistance: (focalDistance) => set({ focalDistance }),
@@ -213,14 +221,37 @@ export const useDebugStore = create<DebugStore>()(
       setFalloffRate: (falloffRate) => set({ falloffRate }),
       bloomEnabled: true,
       setBloomEnabled: (bloomEnabled) => set({ bloomEnabled }),
-      bloomIntensity: 0.4,
+      // Defaults tuned for "bloom only affects light pixels" — the
+      // user-requested contract. With sun intensity 1.62 and an HDR
+      // pipeline (HalfFloat composer), pixels in direct sun reach
+      // luminance ≈ (albedo × 1.62) in linear:
+      //   • Dark vegetation / shadows / midtones (< 0.43 albedo)
+      //     stay below 0.7 → NO bloom ✓
+      //   • Light surfaces / sky / specular highlights
+      //     (> 0.43 albedo in sun, or any HDR > 1.0)
+      //     clear 0.7 → glow ✓
+      // Intensity 1.2 makes the additive halo obviously visible
+      // without washing out the scene. Previous defaults (intensity
+      // 0.4, threshold 0.85) were tuned for a scene that had the
+      // cosmic-SPZ tint pass emitting at 1.5; once v51 disabled
+      // that, bloom had nothing to bite onto, which read as "bloom
+      // doesn't do anything".
+      // v19 (intensity 0.3 / threshold 0.85 / splatBrightness 1.05) made
+      // bloom invisible — the high threshold + tiny gain meant almost
+      // no pixels qualified, and the few that did barely glowed.
+      //
+      // v20 keeps the SELECTIVITY (threshold 0.85, splatBrightness
+      // stays 1.05 to preserve colours / keep ACES out of its
+      // desaturation curve) and only boosts INTENSITY so the few
+      // qualifying highlights actually glow visibly. Net result:
+      // unchanged colours, visible "subtle glow on bright pixels"
+      // exactly as the user asked.
+      bloomIntensity: 0.8,
       setBloomIntensity: (bloomIntensity) => set({ bloomIntensity }),
       bloomThreshold: 0.85,
       setBloomThreshold: (bloomThreshold) => set({ bloomThreshold }),
-      // 0.9 matches the value the original code hard-coded into the
-      // BloomEffect constructor before this knob was exposed. Keeping
-      // it as the default means a fresh load looks identical to the
-      // pre-GUI behaviour.
+      // 0.9 = soft cutoff at the threshold so surfaces near the
+      // boundary don't pop/flicker as the camera moves.
       bloomSmoothing: 0.9,
       setBloomSmoothing: (bloomSmoothing) => set({ bloomSmoothing }),
       brightnessContrastEnabled: false,
@@ -274,7 +305,16 @@ export const useDebugStore = create<DebugStore>()(
       setChromaticEnabled: (chromaticEnabled) => set({ chromaticEnabled }),
       chromaticOffset: 0.0008,
       setChromaticOffset: (chromaticOffset) => set({ chromaticOffset }),
-      motionBlurEnabled: true,
+      // v20: was true. Motion blur is a per-frame full-screen pass
+      // (camera-velocity sample shader + an extra render target) and
+      // contributes a flat ~1–3 ms on the user's machine regardless
+      // of how slow the camera is moving. With bloom + HDR composer
+      // + 5 large GLB creatures + 21M-splat world, that overhead is
+      // enough to be noticeably "SUPER laggy" — and visually it's
+      // doing very little when the camera isn't whipping around. Off
+      // by default; the GUI toggle is still wired so the user can
+      // turn it back on for cinematic sweeps if they want.
+      motionBlurEnabled: false,
       setMotionBlurEnabled: (motionBlurEnabled) => set({ motionBlurEnabled }),
       motionBlurStrength: 0.3,
       setMotionBlurStrength: (motionBlurStrength) => set({ motionBlurStrength }),
@@ -294,7 +334,7 @@ export const useDebugStore = create<DebugStore>()(
     }),
     {
       name: 'image-blaster-debug',
-      version: 16,
+      version: 21,
       migrate: (persisted, version) => {
         if (!persisted || typeof persisted !== 'object') return persisted
         const state = persisted as Record<string, unknown>
@@ -361,6 +401,82 @@ export const useDebugStore = create<DebugStore>()(
         // pre-v14 look; the difference is bloom selectivity.
         if (version < 16) {
           state.toneMappingEnabled = true
+        }
+        // v17: re-baseline bloom defaults for "glow only on light
+        // pixels" semantics. The previous defaults
+        // (intensity 0.4, threshold 0.85) were tuned for a scene
+        // whose cosmic SPZ wrote tinted pixels at emission 1.5 —
+        // the only HDR-bright thing in view. After v51 in
+        // wizardTuning forced that tint pass off, nothing else in
+        // the forest exceeded threshold 0.85, so bloom became
+        // invisible (user-reported "bloom doesn't do anything").
+        //
+        // New defaults: threshold 0.7, intensity 1.2. Combined
+        // with sun intensity 1.62 (see wizardTuning DEFAULT) and
+        // the HDR HalfFloat composer, this means:
+        //   - albedo > ~0.43 in direct sun  → glows
+        //   - sky / specular highlights / emissive  → glows strongly
+        //   - dark surfaces / shadows / midtones    → stay dark
+        // i.e. "bloom only affects light pixels", as requested.
+        //
+        // Force-write (don't gate on undefined) because users who
+        // tweaked the sliders in earlier sessions have stale values
+        // that defeat the new look. Smoothing left at 0.9.
+        if (version < 17) {
+          state.bloomIntensity = 1.2
+          state.bloomThreshold = 0.7
+          state.bloomSmoothing = 0.9
+          state.bloomEnabled = true
+        }
+        // v18: dial back the v17 bloom defaults. The (1.2 / 0.7) combo
+        // was tuned with `splatBrightness = 1.5` in mind, which over-
+        // boosted midtones into the bloom band — rocks, foliage, water
+        // all glowed and the scene felt washed-out. New defaults limit
+        // bloom to genuine highlights; pair with the matching v53
+        // `splatBrightness = 1.2` migration in wizardTuning.ts. Force-
+        // write again so users who still have the v17 values pick up
+        // the calmer look without manually resetting.
+        if (version < 18) {
+          state.bloomIntensity = 0.55
+          state.bloomThreshold = 0.85
+          state.bloomSmoothing = 0.9
+          state.bloomEnabled = true
+        }
+        // v19: even 0.55 still washed colors out because ACES Filmic
+        // tone mapping desaturates highlights aggressively, and the
+        // v18 `splatBrightness = 1.2` was pushing enough pixels into
+        // HDR that ACES caught a lot of midtones in its highlight-
+        // squashing curve. Lower bloom to 0.3 (faint glow) and rely
+        // on v54 dropping `splatBrightness` to 1.05 so midtones stay
+        // in LDR and ACES leaves them alone.
+        if (version < 19) {
+          state.bloomIntensity = 0.3
+          state.bloomThreshold = 0.85
+          state.bloomEnabled = true
+        }
+        // v20: v19's intensity=0.3 went too far the other way — the
+        // bloom became invisible. Bump intensity to 0.8 (visible
+        // glow) while keeping threshold high so only true highlights
+        // qualify. Same colour-preservation behaviour because we
+        // didn't touch the gain or threshold.
+        //
+        // Also default `motionBlurEnabled` to false — full-screen
+        // pass that contributes flat overhead even when standing
+        // still, and the user reported "SUPER laggy" with it on.
+        if (version < 20) {
+          state.bloomIntensity = 0.8
+          state.bloomThreshold = 0.85
+          state.bloomEnabled = true
+          state.motionBlurEnabled = false
+        }
+        // v21: even with motion blur off the user reported continued
+        // lag. The biggest remaining frame-cost is the splat-renderer
+        // DoF shader (`dofEnabled`) which runs per-splat across the
+        // ~21M-splat world whenever viewerQuality === High. Most users
+        // don't notice the visual effect but DO feel the framerate.
+        // Force off; users who liked the focal-blur can re-enable.
+        if (version < 21) {
+          state.dofEnabled = false
         }
         return state
       },

@@ -69,8 +69,21 @@ const defaultTransform = (
 /**
  * Registry of GLBs accessible from the GUI's "Creatures" folder. Default
  * spawn positions are scattered around the character spawn at
- * `(0, spawnFeetY=4, 0)` so all three are findable on first load — the
- * user can then drag them around with the gizmo.
+ * `(0, spawnFeetY=4, 0)` in a rough semicircle so every creature is
+ * findable on first load — the user can then drag them around with the
+ * gizmo (one toggleable TransformControls per creature).
+ *
+ * Adding a creature here automatically:
+ *   - Surfaces a "Creatures → <Name>" subfolder in WizardGui with
+ *     visibility + gizmo + TRS controls (the GUI just maps over this
+ *     list, see WizardGui.tsx).
+ *   - Backfills a default transform in `wizardTuning.creatures` on
+ *     next hydrate (the v49 migration runs on every hydrate, not
+ *     just the v48→v49 hop — see the comment in wizardTuning.ts
+ *     beside `seededCreatures`).
+ *   - Triggers the GLB-load → texture-downscale → PBR-strip
+ *     optimisation pipeline in CreaturesScene.tsx on first mount.
+ * No schema bump or GUI edit required.
  */
 export const CREATURE_CONFIGS: CreatureConfig[] = [
   {
@@ -90,6 +103,22 @@ export const CREATURE_CONFIGS: CreatureConfig[] = [
     name: 'Vinebound Sentinel',
     url: '/worlds/fantasy2/output/vinebound-sentinel/0-vinebound-sentinel.glb',
     defaultTransform: defaultTransform({ posX: -6, posY: 0, posZ: -6 }),
+  },
+  {
+    slug: 'hands-of-the-forest',
+    name: 'Hands of the Forest',
+    url: '/worlds/fantasy2/output/hands-of-the-forest/0-hands-of-the-forest.glb',
+    defaultTransform: defaultTransform({ posX: 10, posY: 0, posZ: -2 }),
+  },
+  {
+    // Distinct slug from the existing `verdant-sentinel` (different
+    // GLB — this one was generated via Meshy AI). Keeping both lets
+    // the user A/B them in the scene without one overwriting the
+    // other's persisted transform.
+    slug: 'verdant-sentinel-meshy',
+    name: 'Verdant Sentinel (Meshy)',
+    url: '/worlds/fantasy2/output/verdant-sentinel-meshy/0-verdant-sentinel-meshy.glb',
+    defaultTransform: defaultTransform({ posX: -10, posY: 0, posZ: -2 }),
   },
 ]
 

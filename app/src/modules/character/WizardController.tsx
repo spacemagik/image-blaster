@@ -53,10 +53,52 @@ const CAPSULE_RADIUS = 0.28
 const CAMERA_INITIAL_DISTANCE = 3.5
 const CAMERA_MIN_DISTANCE = 1.2
 const CAMERA_MAX_DISTANCE = 12
-const CAMERA_TARGET_HEIGHT_FRACTION = 0.7
+// Vertical position of the orbit target along the wizard's height
+// (0 = feet, 1 = crown of head). Was 0.7 (chest) which framed the
+// character with feet visible at the bottom of the screen; bumped to
+// 0.85 (~upper chest / neck) so the default sight-line lands higher
+// on the model and the feet drop out of the default framing. Manual
+// camera tilt still works (see CAMERA_MAX_POLAR_ANGLE) — this just
+// makes the *out-of-the-box* shot feel right without the user having
+// to drag every time.
+const CAMERA_TARGET_HEIGHT_FRACTION = 0.85
+// Minimum camera-Y headroom above the character's feet altitude.
+// Enforced every frame by:
+//   1. Tightening `orbit.maxPolarAngle` so the orbit sphere itself
+//      cannot tilt to a polar angle that would push the camera
+//      below feet + margin (analytic from spherical coords:
+//      `cosθ_max = (floor − target.y) / R`).
+//   2. A post-update `camera.position.y = max(…, floor + margin)`
+//      safety clamp for edge cases (e.g. floor altitude jumping
+//      between frames while the user isn't dragging).
+// 0.3 m keeps the lens out of the dirt at the lowest tilt while
+// still permitting an aggressive low-angle "look up at the wizard's
+// face" shot the user asked for in the previous turn.
+const CAMERA_FLOOR_MARGIN = 0.3
+const CAMERA_MAX_POLAR_ANGLE = Math.PI / 2 + 0.6
 const ONE_SHOT_DEFAULT_DURATION = 1.6
 const MAX_SLOPE_CLIMB_RAD = (50 * Math.PI) / 180
 const MIN_SLOPE_SLIDE_RAD = (25 * Math.PI) / 180
+
+// ── Jump feel ──────────────────────────────────────────────────────────
+// Both windows are deliberately wider than a single 60 Hz frame
+// (≈ 16.7 ms) so the standard "tap space, jump immediately" reflex
+// always lands a jump — and a press just BEFORE touching down buffers
+// into a jump on landing instead of being silently dropped.
+//
+// JUMP_BUFFER_MS: how long after a Space keydown the request stays
+//   valid. With state-tracked jump (old behaviour) a quick tap could
+//   set jump=true and then jump=false again BEFORE the next useFrame
+//   ran — meaning the player had to hold space across a frame boundary
+//   for the jump to register. Now we record the press timestamp and
+//   consume any request that's at most this old.
+//
+// COYOTE_TIME_MS: how long after LEAVING the ground the player can
+//   still jump. Standard platformer affordance for walking off a
+//   ledge — without it, pressing space ~1 frame too late after an
+//   edge feels broken even though the input was barely off.
+const JUMP_BUFFER_MS = 150
+const COYOTE_TIME_MS = 100
 
 function capsuleHalfHeight(height: number) {
   return Math.max(height / 2 - CAPSULE_RADIUS, 0.01)
@@ -77,6 +119,12 @@ interface CharacterPhysicsState {
   linearVelocity: THREE.Vector3
   grounded: boolean
   allowSliding: boolean
+  /** perf.now() timestamp of the most recent frame the controller
+   *  reported `grounded === true`. Used with COYOTE_TIME_MS to allow
+   *  a jump for a brief window after walking off a ledge. Updated
+   *  every frame the character is grounded; read every frame to
+   *  decide whether the coyote affordance still applies. */
+  lastGroundedAt: number
 }
 
 const _move = new THREE.Vector3()
@@ -191,7 +239,13 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       left: false,
       right: false,
       sprint: false,
-      jump: false,
+      /** perf.now() timestamp of the most recent un-consumed Space
+       *  keydown, or null if no jump is pending. Frame loop reads
+       *  this and fires a jump when grounded (or within coyote
+       *  window) AND the request is within JUMP_BUFFER_MS. Edge-
+       *  triggered on keydown (not state-tracked) so a quick tap
+       *  always registers regardless of how soon it's released. */
+      jumpRequestedAt: null as number | null,
     })
 
     const stateRef = useRef<CharacterPhysicsState>({
@@ -199,6 +253,7 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       linearVelocity: new THREE.Vector3(),
       grounded: false,
       allowSliding: false,
+      lastGroundedAt: 0,
     })
 
     const animStateRef = useRef({
@@ -261,7 +316,7 @@ export const WizardController = forwardRef<WizardControllerHandle>(
           inputRef.current.left = false
           inputRef.current.right = false
           inputRef.current.sprint = false
-          inputRef.current.jump = false
+          inputRef.current.jumpRequestedAt = null
           return
         }
         const down = event.type === 'keydown'
@@ -287,8 +342,21 @@ export const WizardController = forwardRef<WizardControllerHandle>(
             inputRef.current.sprint = down
             break
           case 'Space':
-            inputRef.current.jump = down
-            if (down) event.preventDefault()
+            // Edge-trigger ONLY on the initial keydown (event.repeat
+            // filters out OS-level key auto-repeat) so holding space
+            // doesn't queue up a stream of jumps. The frame loop
+            // consumes this timestamp the next time we're grounded
+            // (or within COYOTE_TIME_MS of leaving the ground)
+            // PROVIDED we're still inside JUMP_BUFFER_MS — otherwise
+            // it expires silently.
+            if (down) {
+              if (!event.repeat) inputRef.current.jumpRequestedAt = performance.now()
+              event.preventDefault()
+            }
+            // keyup is intentionally ignored: the buffer window
+            // (not the key-up edge) is what expires a stale
+            // request, so a quick tap-and-release still buffers
+            // into the next grounded frame.
             break
           case 'KeyF':
             if (down && !event.repeat) triggerOneShot('pick')
@@ -323,7 +391,8 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       inputRef.current.left = false
       inputRef.current.right = false
       inputRef.current.sprint = false
-      inputRef.current.jump = false
+      inputRef.current.jumpRequestedAt = null
+      stateRef.current.lastGroundedAt = 0
       prevFeetSeededRef.current = false
       animStateRef.current.smoothedHSpeed = 0
       animStateRef.current.airAccum = 0
@@ -422,14 +491,41 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       _gravity.set(0, t.gravityY, 0)
       _newVel.set(0, 0, 0)
 
+      // ── Jump consumption with input buffer + coyote time ──────────
+      // The jump request is a TIMESTAMP, not a boolean (see the
+      // Space case in the keydown handler). Two timing windows
+      // decide whether to consume it:
+      //
+      //   1. JUMP_BUFFER_MS — how long the request stays valid
+      //      after the key was pressed. Wider than one frame so
+      //      a quick tap can never be silently dropped between
+      //      keydown and useFrame.
+      //   2. COYOTE_TIME_MS — grace period to still jump after
+      //      walking off a ledge. Reads from `state.lastGroundedAt`,
+      //      which is refreshed below on every grounded frame.
+      //
+      // The request is consumed (set back to null) the moment we
+      // fire a jump. If the buffer window expires without consumption
+      // we explicitly null it so a stale press from seconds ago can't
+      // fire whenever the player finally lands.
+      const nowMs = performance.now()
+      const reqAt = inputRef.current.jumpRequestedAt
+      const reqIsRecent = reqAt !== null && (nowMs - reqAt) <= JUMP_BUFFER_MS
+      const inCoyote = (nowMs - state.lastGroundedAt) <= COYOTE_TIME_MS
+      const canJump = reqIsRecent && (grounded || inCoyote)
+
       if (grounded) {
         _newVel.set(0, 0, 0)
-        if (inputRef.current.jump) {
-          _newVel.y = t.jumpSpeed
-          inputRef.current.jump = false
-        }
       } else {
         _newVel.copy(_verticalVel)
+      }
+      if (canJump) {
+        _newVel.y = t.jumpSpeed
+        inputRef.current.jumpRequestedAt = null
+      } else if (reqAt !== null && !reqIsRecent) {
+        // Buffer window expired without us landing — drop the
+        // stale request so a future landing doesn't surprise-jump.
+        inputRef.current.jumpRequestedAt = null
       }
       _newVel.addScaledVector(_gravity, dt)
       _newVel.x += state.desiredVelocity.x
@@ -454,6 +550,10 @@ export const WizardController = forwardRef<WizardControllerHandle>(
         z: current.z + movement.z,
       })
       state.grounded = controller.computedGrounded()
+      // Refresh the coyote-time anchor every frame we're grounded so
+      // the next frame's coyote check sees a near-zero age. Read by
+      // the jump-consumption block at the top of the next useFrame.
+      if (state.grounded) state.lastGroundedAt = nowMs
       if (dt > 1e-8) {
         // X/Z come from actual movement so swept-collision side-slides feel
         // physical. Y intentionally uses the *planned* velocity (`_newVel.y`,
@@ -468,7 +568,24 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       }
 
       // ── 4. Animation stability + horizontal-speed smoothing ──────────────────
-      if (state.grounded) {
+      // `dogAnimGroundReleaseHold` (~0.75s) intentionally delays the
+      // grounded→airborne animation flip to absorb one-frame phantom
+      // ground losses on bumpy/sparse terrain. The flaw: it ALSO
+      // delayed the jump animation, so a space-press produced a
+      // perfectly-timed physics jump but the wizard kept playing
+      // idle/walk through the rise. We special-case the `canJump`
+      // branch (computed in section 2) to bypass the hold — that flag
+      // is true ONLY on the exact frame we consumed a deliberate
+      // jump request, so terrain-glitch protection stays intact for
+      // every other off-ground transition.
+      if (canJump) {
+        animStateRef.current.stableGrounded = false
+        // Seed airAccum to the threshold so even the cancellation
+        // path below ("if airAccum >= hold") would also have flipped
+        // us to false — keeps the invariant that stableGrounded and
+        // airAccum agree.
+        animStateRef.current.airAccum = t.dogAnimGroundReleaseHold
+      } else if (state.grounded) {
         animStateRef.current.stableGrounded = true
         animStateRef.current.airAccum = 0
       } else {
@@ -577,7 +694,47 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       const orbit = orbitRef.current
       if (orbit) {
         orbit.target.copy(_targetWorld)
+
+        // Dynamic camera-floor clamp: prevent the orbit sphere from
+        // ever dropping the camera below `_feet.y + CAMERA_FLOOR_MARGIN`.
+        //
+        // On a sphere of radius R around target, camera.y is:
+        //   camera.y = target.y + R · cos(θ)        (θ = polar angle)
+        // so the constraint  camera.y ≥ floor  becomes:
+        //   cos(θ) ≥ (floor − target.y) / R
+        //   ⇒ θ ≤ acos((floor − target.y) / R)
+        // (since target.y > floor in normal play, the RHS is negative
+        //  and the resulting cap is somewhere in (π/2, π))
+        //
+        // We then take the tighter of:
+        //   • the floor-driven cap above, and
+        //   • the artistic CAMERA_MAX_POLAR_ANGLE upper bound,
+        // and write it into OrbitControls each frame so user drags
+        // hit the floor as a soft wall.
+        const floorY = _feet.y + CAMERA_FLOOR_MARGIN
+        const camToTarget = camera.position.distanceTo(_targetWorld)
+        if (camToTarget > 1e-4) {
+          const cosCap = THREE.MathUtils.clamp(
+            (floorY - _targetWorld.y) / camToTarget,
+            -0.9999,
+            0.9999,
+          )
+          const floorPolarMax = Math.acos(cosCap)
+          orbit.maxPolarAngle = Math.min(CAMERA_MAX_POLAR_ANGLE, floorPolarMax)
+        } else {
+          orbit.maxPolarAngle = CAMERA_MAX_POLAR_ANGLE
+        }
+
         orbit.update()
+
+        // Safety net: between frames the floor altitude can change
+        // (e.g. wizard walks off a ledge and `_feet.y` drops sharply
+        // — see the snap-to-ground behaviour in section 3) before
+        // the polar-angle cap above has had a chance to apply on a
+        // user drag. If that ever leaves the camera below the floor,
+        // shove it back up. We don't restore the corresponding polar
+        // angle because the next frame's recomputation handles it.
+        if (camera.position.y < floorY) camera.position.y = floorY
       }
     })
 
@@ -616,8 +773,19 @@ export const WizardController = forwardRef<WizardControllerHandle>(
           enablePan={false}
           minDistance={CAMERA_MIN_DISTANCE}
           maxDistance={CAMERA_MAX_DISTANCE}
+          // Polar angle is measured from world +Y (0 = directly above
+          // target, π/2 = horizon, π = directly below).
+          //   • minPolarAngle 0.2 (~11°) keeps a top-down view possible
+          //     without hitting the +Y pole singularity.
+          //   • maxPolarAngle (~124°, see CAMERA_MAX_POLAR_ANGLE) lets
+          //     the camera dip below chest height to look UP at the
+          //     wizard's face.
+          // This is only the static UPPER BOUND on the tilt range; the
+          // useFrame loop tightens `orbit.maxPolarAngle` further every
+          // frame so the camera never crosses below the floor
+          // (see CAMERA_FLOOR_MARGIN comment).
           minPolarAngle={0.2}
-          maxPolarAngle={Math.PI / 2 - 0.05}
+          maxPolarAngle={CAMERA_MAX_POLAR_ANGLE}
         />
       </>
     )

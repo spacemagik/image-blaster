@@ -172,15 +172,43 @@ export function WizardGui() {
     }
 
     const ppBloomFolder = ppFolder.addFolder('Bloom (glow on bright pixels)')
+    // Single proxy for the splat-HDR-boost slider — lives in
+    // `wizardTuning` (not `useDebugStore`) because it's logically a
+    // splat-renderer feature, but is exposed in the Bloom panel so
+    // the user discovers it together with the bloom knobs it feeds.
+    const splatBoostProxy = { splatBrightness: tAny.splatBrightness ?? 1.5 }
     const ppBloomControls = [
       ppBloomFolder.add(ppProxy, 'bloomEnabled').name('Enabled').onChange(ppPush('setBloomEnabled')),
-      // 0..3 covers "subtle rim glow" → "extreme plasma halo". The
-      // cosmic SPZ's tint pass writes emission ≈ 1.5 so 0.4 reads
-      // well; crank to 1+ for dramatic glow.
+      // 0..3 covers "subtle rim glow" → "extreme plasma halo". With
+      // splat brightness ≥1.2 (default), 1-1.5 reads as obvious;
+      // crank to 2+ for dramatic glow on light splat pixels.
       ppBloomFolder.add(ppProxy, 'bloomIntensity', 0, 3, 0.01).name('Intensity').onChange(ppPush('setBloomIntensity')),
       ppBloomFolder.add(ppProxy, 'bloomThreshold', 0, 1, 0.01).name('Threshold').onChange(ppPush('setBloomThreshold')),
       ppBloomFolder.add(ppProxy, 'bloomSmoothing', 0, 1, 0.01).name('Smoothing').onChange(ppPush('setBloomSmoothing')),
+      // Splat HDR boost — a multiplier applied to every world-splat
+      // RGB pixel by a Spark worldModifier (splatGain.ts). This is
+      // the *enabler* for "bloom catches bright SPZ pixels": SPZ
+      // colours are stored in LDR [0,1], so without a boost their
+      // brightest pixels sit RIGHT AT the bloom threshold and only
+      // the rare hottest spots qualify. At 1.5 the brightest splats
+      // hit ~1.5 linear (clearly HDR), so the threshold catches
+      // them cleanly; dark splats scale proportionally and stay
+      // below threshold. 1.0 = no boost; 3.0 = aggressive HDR.
+      ppBloomFolder.add(splatBoostProxy, 'splatBrightness', 1, 3, 0.01)
+        .name('Splat HDR boost')
+        .onChange((v: number) => {
+          useWizardTuning.getState().setTuning({ splatBrightness: v })
+        }),
     ]
+    // Keep the proxy in sync if the store is written externally
+    // (e.g. a reset or another preset toggling it). Mirrors the
+    // pattern used by the ppProxy subscribe below.
+    const unsubSplatBoost = useWizardTuning.subscribe((s, prev) => {
+      if (s.splatBrightness !== prev.splatBrightness) {
+        splatBoostProxy.splatBrightness = s.splatBrightness
+        for (const c of ppBloomControls) c.updateDisplay()
+      }
+    })
 
     const ppBCFolder = ppFolder.addFolder('Brightness / Contrast')
     const ppBCControls = [
@@ -854,6 +882,7 @@ export function WizardGui() {
       unsubPortal()
       unsubCreatures()
       unsubPP()
+      unsubSplatBoost()
       gui.destroy()
       guiRef.current = null
       // Suppress unused-tracked warning; refs kept to allow future updateDisplay() reset.

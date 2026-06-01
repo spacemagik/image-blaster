@@ -107,6 +107,16 @@ export interface WizardTuning {
   splatBehindFoveate: number   // 0..1   (default 0.2, lower = fewer behind-camera splats)
   splatLodInflate: boolean     // softer kernels; can hide LoD popping at low budgets
 
+  /** Multiplier applied to every world-splat RGB pixel in a Spark
+   *  `worldModifier` (see `splatGain.ts`). Default 1.5 pushes
+   *  brightly-lit splat pixels above the 0.7 bloom threshold so the
+   *  composer's bloom pass can glow on them — dark splats stay below
+   *  threshold because the multiplier scales them proportionally.
+   *  Value of 1.0 = no boost (modifier becomes a pure pass-through).
+   *  Range exposed in the GUI is 1..3; the slider hits HDR territory
+   *  above ~1.2. */
+  splatBrightness: number
+
   // Lighting
   ambientIntensity: number
   sunIntensity: number
@@ -665,6 +675,19 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   splatBehindFoveate: 0.08,
   splatLodInflate: false,
 
+  // Gain multiplier applied to every world-splat RGB pixel via
+  // the `worldModifier` in `splatGain.ts`.
+  //
+  // v52 shipped 1.5 (overcooked); v53 dropped it to 1.2 (still
+  // pushed too many pixels into ACES Filmic's highlight-desaturation
+  // curve, leaving the scene grey); v54 lands on 1.05 — barely a
+  // push at all. With this gain a midtone (~0.5) only reaches ~0.53
+  // so it's nowhere near the 0.85 bloom threshold AND well clear of
+  // ACES's saturation rolloff. Only genuine specular hits (already
+  // ~0.85+ in LDR) get bumped over the threshold to bloom subtly,
+  // preserving the actual colours of everything else.
+  splatBrightness: 1.05,
+
   ambientIntensity: 0.83,
   sunIntensity: 1.62,
   sunPosX: -23.5,
@@ -842,7 +865,15 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   portalRegionPosX: -26.650,
   portalRegionPosY: 6.5,
   portalRegionPosZ: -83.276,
-  portalShowSphere: true,
+  // v55: was `true`. This is the translucent purple bubble helper
+  // rendered around the cosmic swirl to visualise its region of
+  // effect — a debug aid from the dyno-portal experiment that's
+  // no longer reachable from the GUI (removed in the cosmic-swirl
+  // simplification). v51 migration disabled it for users coming
+  // from older versions, but fresh installs were still hitting
+  // the default `true`. Default-off now so the helper has no way
+  // to appear unless someone reaches into the store directly.
+  portalShowSphere: false,
 
   // Splat tint — defaults give the same cyan-vortex look but applied
   // directly to the swirled splats themselves. On by default so that
@@ -1020,7 +1051,14 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // schema bump. `portalEnabled` itself is force-OFF so the dyno
       // doesn't even attach by default — the rigid spin path is
       // entirely independent of it.
-      version: 51,
+      //
+      // v52: introduce `splatBrightness` (default 1.5) so the world
+      // splat's bright pixels get pushed into HDR (>1.0 linear) and the
+      // bloom pass can pick them up. Without this the SPZ's colours
+      // max out at 1.0 LDR — right at the bloom threshold — so
+      // bloom looked broken once the cosmic-SPZ tint pass was
+      // disabled in v51. See `splatGain.ts` for the modifier impl.
+      version: 55,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1469,6 +1507,47 @@ export const useWizardTuning = create<WizardTuningStore>()(
           // Force gizmo target to 'splat' — 'region' was the other
           // option but it's no longer reachable from the GUI.
           migrated.portalGizmoTarget = 'splat'
+        }
+        // v52: seed `splatBrightness` for older states. Missing field
+        // → SplatRenderer reads `undefined` → splatGain modifier
+        // creates with NaN initial → shader short-circuits to gain=1.0
+        // (the NaN guard inside the kernel) so it'd still be visually
+        // safe, but the slider would read NaN and the user couldn't
+        // increase it without first typing a number. Force the default
+        // so the GUI surface is immediately usable.
+        if (fromVersion < 52) {
+          migrated.splatBrightness = 1.5
+        }
+        // v53: walk back the v52 default. 1.5 was tuned to make bloom
+        // easy to spot, but combined with the v17 bloom defaults (1.2 /
+        // 0.7) it blew out specular highlights and pushed midtones into
+        // the bloom band. v53 = 1.2 keeps the HDR push for genuine
+        // highlights (which now pair with the v18 threshold = 0.85)
+        // while leaving midtones below the bloom threshold. Force-write
+        // so users who tweaked the slider higher get the calmer baseline.
+        if (fromVersion < 53) {
+          migrated.splatBrightness = 1.2
+        }
+        // v54: 1.2 was still feeding too many pixels into ACES Filmic's
+        // highlight-desaturation curve — the scene came out grey and
+        // muted ("bloom mutes the colors" screenshot, May 31 '26 14:11).
+        // Drop to 1.05: barely any HDR push, only true specular hits
+        // (already 0.85+ in LDR) tip over the bloom threshold, and ACES
+        // leaves midtones alone so colours stay saturated. Paired with
+        // the v19 bloomIntensity drop to 0.3 for a "subtle glow without
+        // dulling colors" look.
+        if (fromVersion < 54) {
+          migrated.splatBrightness = 1.05
+        }
+        // v55: kill the residual translucent purple bubble around the
+        // cosmic swirl. v51 set this false for users coming from <51
+        // but the bubble was still appearing on this user's machine
+        // (May 31 '26 16:32 screenshot) — likely because their state
+        // never went through the v51 hop, or some path re-wrote true
+        // back in. Force false unconditionally now so the helper can
+        // never show until someone wires GUI controls for it again.
+        if (fromVersion < 55) {
+          migrated.portalShowSphere = false
         }
         // v49: introduce the `creatures` record. Older stores have no
         // `creatures` field at all → CreaturesScene reads `undefined`,
