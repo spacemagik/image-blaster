@@ -8,6 +8,14 @@ export interface WorldAssets {
       '150k'?: string
       full_res?: string
     }
+    /**
+     * Optional Spark streaming-LOD file (`.rad`). When present it is the
+     * preferred render source (see `getSplatUrl`): Spark streams precomputed
+     * LOD chunks via HTTP byte-range requests instead of decoding the whole
+     * `.spz` and building LOD on the fly. The `.spz` stays as the fallback /
+     * prefetch source.
+     */
+    rad_url?: string
     semantics_metadata: {
       metric_scale_factor: number
       ground_plane_offset: number

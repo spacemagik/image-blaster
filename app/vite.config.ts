@@ -416,6 +416,16 @@ function worldsPlugin(): Plugin {
       }
     }
 
+    // Spark streaming-LOD file (`.rad`). Optional: a world ships one when it
+    // has been precomputed (e.g. `0-world-full_res-lod.rad`). Matched the same
+    // way as the SPZ — newest matching index wins. When present it becomes the
+    // preferred render source in the client (see `getSplatUrl`).
+    const radMatches = indexedFiles(files, { extensions: new Set(['.rad']) })
+      .filter((file) => file.slug.startsWith('world'))
+      .filter((file) => index === undefined || file.index === index)
+    const radFilename = (index === undefined ? latestIndexed(radMatches) : radMatches[0])?.name
+    const radUrl = radFilename ? worldAssetUrl(slug, radFilename) : ''
+
     const collider = worldAssetFilename(files, index, 'world', MODEL_EXTENSIONS)
     const pano = worldAssetFilename(files, index, 'world-pano', IMAGE_EXTENSIONS)
     const thumbnail = worldAssetFilename(files, index, 'world-thumbnail', IMAGE_EXTENSIONS)
@@ -435,6 +445,7 @@ function worldsPlugin(): Plugin {
         splats: {
           ...(world.assets?.splats ?? {}),
           spz_urls: spzUrls,
+          ...(radUrl ? { rad_url: radUrl } : {}),
           semantics_metadata: {
             metric_scale_factor: 1,
             ground_plane_offset: 0,
@@ -708,6 +719,7 @@ function worldsPlugin(): Plugin {
       server.watcher.on('unlinkDir', onWorldFsChange)
       const MIME: Record<string, string> = {
         '.spz': 'application/octet-stream',
+        '.rad': 'application/octet-stream',
         '.glb': 'model/gltf-binary',
         '.png': 'image/png',
         '.webp': 'image/webp',
@@ -862,8 +874,39 @@ function worldsPlugin(): Plugin {
 
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
           const ext = path.extname(filePath).toLowerCase()
+          const total = fs.statSync(filePath).size
           res.setHeader('Content-Type', MIME[ext] ?? 'application/octet-stream')
-          fs.createReadStream(filePath).pipe(res)
+          // Spark's streaming splat loaders read files via HTTP `Range`
+          // requests: a small header probe first, then chunks on demand
+          // (`.rad` LOD chunks; `.spz` LOD paging). Without a proper
+          // `206 Partial Content` response the loader stalls — encoded=0,
+          // blank scene, no error. This mirrors `spzRangePlugin` (which
+          // only covers `public/`) for assets served out of `worlds/`.
+          res.setHeader('Accept-Ranges', 'bytes')
+          const range = req.headers.range
+          if (req.method === 'HEAD') {
+            res.statusCode = 200
+            res.setHeader('Content-Length', String(total))
+            res.end()
+          } else if (!range) {
+            res.statusCode = 200
+            res.setHeader('Content-Length', String(total))
+            fs.createReadStream(filePath).pipe(res)
+          } else {
+            const m = /^bytes=(\d+)-(\d+)?$/.exec(range)
+            const start = m ? parseInt(m[1], 10) : NaN
+            const end = m && m[2] ? Math.min(parseInt(m[2], 10), total - 1) : total - 1
+            if (!m || Number.isNaN(start) || start > end || start >= total) {
+              res.statusCode = 416
+              res.setHeader('Content-Range', `bytes */${total}`)
+              res.end()
+            } else {
+              res.statusCode = 206
+              res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`)
+              res.setHeader('Content-Length', String(end - start + 1))
+              fs.createReadStream(filePath, { start, end }).pipe(res)
+            }
+          }
         } else if (path.extname(requestPath)) {
           res.statusCode = 404
           res.end('Not found')

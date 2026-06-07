@@ -18,6 +18,12 @@ function localWorldAssetUrl(url: string | undefined): string {
 }
 
 export function getSplatUrl(world: World): string {
-  const urls = world.assets.splats.spz_urls
-  return localWorldAssetUrl(urls.full_res)
+  const splats = world.assets.splats
+  // Prefer the Spark streaming-LOD `.rad` file when the world ships one —
+  // it streams precomputed LOD chunks (faster first paint, far less main-
+  // thread work than decoding the full `.spz` + building LOD live). Falls
+  // back to the full-res `.spz` for worlds that don't have a `.rad` yet.
+  const rad = localWorldAssetUrl(splats.rad_url)
+  if (rad) return rad
+  return localWorldAssetUrl(splats.spz_urls.full_res)
 }
