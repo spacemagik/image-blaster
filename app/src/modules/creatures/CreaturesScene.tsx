@@ -30,6 +30,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import { useWizardTuning } from '../character/wizardTuning'
 import { CREATURE_CONFIGS, type CreatureConfig } from './creatureConfigs'
+import { useCreatureLoadStore } from './creatureLoadStatus'
 import {
   getActiveSplatMesh,
   subscribeActiveSplatMesh,
@@ -281,7 +282,7 @@ function CreatureInstance({ config }: { config: CreatureConfig }) {
     <>
       <group ref={setProxy}>
         <Suspense fallback={null}>
-          <CreatureModel url={config.url} label={config.name} />
+          <CreatureModel url={config.url} label={config.name} slug={config.slug} />
         </Suspense>
       </group>
       {gizmoEnabled && proxy && (
@@ -314,7 +315,15 @@ function CreatureInstance({ config }: { config: CreatureConfig }) {
  * only have one parent — without the clone, mounting a duplicate would
  * silently steal the first instance's mesh).
  */
-function CreatureModel({ url, label }: { url: string; label: string }) {
+function CreatureModel({
+  url,
+  label,
+  slug,
+}: {
+  url: string
+  label: string
+  slug: string
+}) {
   const gltf = useLoader(GLTFLoader, url)
   const scene = useRef<THREE.Object3D | null>(null)
   if (!scene.current) {
@@ -331,6 +340,16 @@ function CreatureModel({ url, label }: { url: string; label: string }) {
     optimizeCreatureGltf(cloned, label)
     scene.current = cloned
   }
+  // Notify the load-status store that THIS creature has finished
+  // suspending and is now in the render tree. The StartScreen uses
+  // this signal to hold its fade-out until every creature is on screen
+  // — without it, you click PLAY before the 52 MB hands GLB has
+  // finished loading, walk a few steps, and watch it pop into the
+  // world as the suspense resolves. Once marked, it stays marked for
+  // the rest of the page lifetime.
+  useEffect(() => {
+    useCreatureLoadStore.getState().markLoaded(slug)
+  }, [slug])
   return <primitive object={scene.current} dispose={null} />
 }
 

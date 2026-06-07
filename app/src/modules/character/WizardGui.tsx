@@ -27,7 +27,7 @@ import {
   type WizardTuning,
 } from './wizardTuning'
 import { SPARKLE_PRESETS, type SparklePreset } from '../splat/sparkle'
-import { useDebugStore, TONE_MAPPING_MODE_NAMES, type ToneMappingModeName } from '../../store/debug'
+import { useDebugStore, TONE_MAPPING_MODE_NAMES, type ToneMappingModeName, type PerWorldDebugKey } from '../../store/debug'
 import { wizardFeetPos } from './wizardState'
 import {
   CREATURE_CONFIGS,
@@ -165,10 +165,28 @@ export function WizardGui() {
     // Generic pusher: maps a proxy key to the matching setter
     // (`bloomEnabled` → `setBloomEnabled`). Hand-typed for safety —
     // a runtime symbol-stringify would lose TS coverage.
+    //
+    // Per-world mirroring: in addition to writing the value to
+    // useDebugStore (where PostProcessing.tsx reads it from), we
+    // ALSO call `recordDebugOverride(field, value)` on the
+    // wizardTuning store. That writes the value into the active
+    // world's `worldDebugOverrides[slug]` snapshot, so when the
+    // user teleports between worlds, App.tsx's apply-effect
+    // restores each world's saved PP independently. Without this
+    // mirror, every PP slider would be globally shared between
+    // worlds (the bug the user reported on 2026-05-31 22:58).
+    //
+    // The `fieldName` argument MUST match the corresponding
+    // `PerWorldDebugKey` (the field on `useDebugStore`, not the
+    // setter). Mistyping it would silently break the per-world
+    // round-trip — the override would save under a key that
+    // `applyDebugOverrides` doesn't know about, so it'd never get
+    // re-applied on world swap.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ppPush = (setterName: string) => (value: any) => {
+    const ppPush = (setterName: string, fieldName: PerWorldDebugKey) => (value: any) => {
       const setter = (useDebugStore.getState() as unknown as Record<string, (v: unknown) => void>)[setterName]
       if (typeof setter === 'function') setter(value)
+      useWizardTuning.getState().recordDebugOverride(fieldName, value)
     }
 
     const ppBloomFolder = ppFolder.addFolder('Bloom (glow on bright pixels)')
@@ -178,13 +196,13 @@ export function WizardGui() {
     // the user discovers it together with the bloom knobs it feeds.
     const splatBoostProxy = { splatBrightness: tAny.splatBrightness ?? 1.5 }
     const ppBloomControls = [
-      ppBloomFolder.add(ppProxy, 'bloomEnabled').name('Enabled').onChange(ppPush('setBloomEnabled')),
+      ppBloomFolder.add(ppProxy, 'bloomEnabled').name('Enabled').onChange(ppPush('setBloomEnabled', 'bloomEnabled')),
       // 0..3 covers "subtle rim glow" → "extreme plasma halo". With
       // splat brightness ≥1.2 (default), 1-1.5 reads as obvious;
       // crank to 2+ for dramatic glow on light splat pixels.
-      ppBloomFolder.add(ppProxy, 'bloomIntensity', 0, 3, 0.01).name('Intensity').onChange(ppPush('setBloomIntensity')),
-      ppBloomFolder.add(ppProxy, 'bloomThreshold', 0, 1, 0.01).name('Threshold').onChange(ppPush('setBloomThreshold')),
-      ppBloomFolder.add(ppProxy, 'bloomSmoothing', 0, 1, 0.01).name('Smoothing').onChange(ppPush('setBloomSmoothing')),
+      ppBloomFolder.add(ppProxy, 'bloomIntensity', 0, 3, 0.01).name('Intensity').onChange(ppPush('setBloomIntensity', 'bloomIntensity')),
+      ppBloomFolder.add(ppProxy, 'bloomThreshold', 0, 1, 0.01).name('Threshold').onChange(ppPush('setBloomThreshold', 'bloomThreshold')),
+      ppBloomFolder.add(ppProxy, 'bloomSmoothing', 0, 1, 0.01).name('Smoothing').onChange(ppPush('setBloomSmoothing', 'bloomSmoothing')),
       // Splat HDR boost — a multiplier applied to every world-splat
       // RGB pixel by a Spark worldModifier (splatGain.ts). This is
       // the *enabler* for "bloom catches bright SPZ pixels": SPZ
@@ -212,62 +230,62 @@ export function WizardGui() {
 
     const ppBCFolder = ppFolder.addFolder('Brightness / Contrast')
     const ppBCControls = [
-      ppBCFolder.add(ppProxy, 'brightnessContrastEnabled').name('Enabled').onChange(ppPush('setBrightnessContrastEnabled')),
-      ppBCFolder.add(ppProxy, 'brightness', -1, 1, 0.01).name('Brightness').onChange(ppPush('setBrightness')),
-      ppBCFolder.add(ppProxy, 'contrast', -1, 1, 0.01).name('Contrast').onChange(ppPush('setContrast')),
+      ppBCFolder.add(ppProxy, 'brightnessContrastEnabled').name('Enabled').onChange(ppPush('setBrightnessContrastEnabled', 'brightnessContrastEnabled')),
+      ppBCFolder.add(ppProxy, 'brightness', -1, 1, 0.01).name('Brightness').onChange(ppPush('setBrightness', 'brightness')),
+      ppBCFolder.add(ppProxy, 'contrast', -1, 1, 0.01).name('Contrast').onChange(ppPush('setContrast', 'contrast')),
     ]
 
     const ppVignetteFolder = ppFolder.addFolder('Vignette (dark corners)')
     const ppVignetteControls = [
-      ppVignetteFolder.add(ppProxy, 'vignetteEnabled').name('Enabled').onChange(ppPush('setVignetteEnabled')),
-      ppVignetteFolder.add(ppProxy, 'vignetteDarkness', 0, 1, 0.01).name('Darkness').onChange(ppPush('setVignetteDarkness')),
-      ppVignetteFolder.add(ppProxy, 'vignetteOffset', 0, 1, 0.01).name('Offset').onChange(ppPush('setVignetteOffset')),
+      ppVignetteFolder.add(ppProxy, 'vignetteEnabled').name('Enabled').onChange(ppPush('setVignetteEnabled', 'vignetteEnabled')),
+      ppVignetteFolder.add(ppProxy, 'vignetteDarkness', 0, 1, 0.01).name('Darkness').onChange(ppPush('setVignetteDarkness', 'vignetteDarkness')),
+      ppVignetteFolder.add(ppProxy, 'vignetteOffset', 0, 1, 0.01).name('Offset').onChange(ppPush('setVignetteOffset', 'vignetteOffset')),
     ]
 
     const ppToneFolder = ppFolder.addFolder('Tone mapping')
     const ppToneControls = [
-      ppToneFolder.add(ppProxy, 'toneMappingEnabled').name('Enabled').onChange(ppPush('setToneMappingEnabled')),
+      ppToneFolder.add(ppProxy, 'toneMappingEnabled').name('Enabled').onChange(ppPush('setToneMappingEnabled', 'toneMappingEnabled')),
       // Curve dropdown — selecting a different mode rebuilds the
       // shader in PostProcessing (the curve is baked at construction
       // time per the lib's design).
-      ppToneFolder.add(ppProxy, 'toneMappingMode', TONE_MAPPING_MODE_NAMES as readonly ToneMappingModeName[]).name('Curve').onChange(ppPush('setToneMappingMode')),
+      ppToneFolder.add(ppProxy, 'toneMappingMode', TONE_MAPPING_MODE_NAMES as readonly ToneMappingModeName[]).name('Curve').onChange(ppPush('setToneMappingMode', 'toneMappingMode')),
       // Exposure is applied as a pre-curve multiply via
       // renderer.toneMappingExposure. 0 = pitch black; 1 = neutral.
-      ppToneFolder.add(ppProxy, 'exposure', 0, 3, 0.01).name('Exposure (×)').onChange(ppPush('setExposure')),
+      ppToneFolder.add(ppProxy, 'exposure', 0, 3, 0.01).name('Exposure (×)').onChange(ppPush('setExposure', 'exposure')),
     ]
 
     const ppDofFolder = ppFolder.addFolder('Depth of field (post)')
     const ppDofControls = [
-      ppDofFolder.add(ppProxy, 'dofPostEnabled').name('Enabled').onChange(ppPush('setDofPostEnabled')),
+      ppDofFolder.add(ppProxy, 'dofPostEnabled').name('Enabled').onChange(ppPush('setDofPostEnabled', 'dofPostEnabled')),
       // 0..1 normalised along near→far frustum. 0.02 ≈ subject ~ 5m
       // away on a typical 50° FOV camera.
-      ppDofFolder.add(ppProxy, 'dofPostFocusDistance', 0, 1, 0.001).name('Focus distance').onChange(ppPush('setDofPostFocusDistance')),
-      ppDofFolder.add(ppProxy, 'dofPostFocalLength', 0, 1, 0.001).name('Focal length').onChange(ppPush('setDofPostFocalLength')),
+      ppDofFolder.add(ppProxy, 'dofPostFocusDistance', 0, 1, 0.001).name('Focus distance').onChange(ppPush('setDofPostFocusDistance', 'dofPostFocusDistance')),
+      ppDofFolder.add(ppProxy, 'dofPostFocalLength', 0, 1, 0.001).name('Focal length').onChange(ppPush('setDofPostFocalLength', 'dofPostFocalLength')),
       // 0 = sharp everywhere, 10 = extreme bokeh. Increase
       // gradually; high values are expensive (per-pixel disk
       // gather).
-      ppDofFolder.add(ppProxy, 'dofPostBokehScale', 0, 10, 0.05).name('Bokeh scale').onChange(ppPush('setDofPostBokehScale')),
+      ppDofFolder.add(ppProxy, 'dofPostBokehScale', 0, 10, 0.05).name('Bokeh scale').onChange(ppPush('setDofPostBokehScale', 'dofPostBokehScale')),
     ]
 
     const ppColorFolder = ppFolder.addFolder('Colour grade')
     const ppColorControls = [
-      ppColorFolder.add(ppProxy, 'colorGradeEnabled').name('Enabled').onChange(ppPush('setColorGradeEnabled')),
+      ppColorFolder.add(ppProxy, 'colorGradeEnabled').name('Enabled').onChange(ppPush('setColorGradeEnabled', 'colorGradeEnabled')),
       // Hue rotation in radians. -π..+π = full wheel rotation.
-      ppColorFolder.add(ppProxy, 'hue', -Math.PI, Math.PI, 0.01).name('Hue (rad)').onChange(ppPush('setHue')),
+      ppColorFolder.add(ppProxy, 'hue', -Math.PI, Math.PI, 0.01).name('Hue (rad)').onChange(ppPush('setHue', 'hue')),
       // -1 = greyscale, 0 = neutral, +1 = saturation doubled.
-      ppColorFolder.add(ppProxy, 'saturation', -1, 1, 0.01).name('Saturation').onChange(ppPush('setSaturation')),
+      ppColorFolder.add(ppProxy, 'saturation', -1, 1, 0.01).name('Saturation').onChange(ppPush('setSaturation', 'saturation')),
     ]
 
     const ppChromaFolder = ppFolder.addFolder('Chromatic aberration')
     const ppChromaControls = [
-      ppChromaFolder.add(ppProxy, 'chromaticEnabled').name('Enabled').onChange(ppPush('setChromaticEnabled')),
-      ppChromaFolder.add(ppProxy, 'chromaticOffset', 0, 0.01, 0.0001).name('Offset (px-equiv)').onChange(ppPush('setChromaticOffset')),
+      ppChromaFolder.add(ppProxy, 'chromaticEnabled').name('Enabled').onChange(ppPush('setChromaticEnabled', 'chromaticEnabled')),
+      ppChromaFolder.add(ppProxy, 'chromaticOffset', 0, 0.01, 0.0001).name('Offset (px-equiv)').onChange(ppPush('setChromaticOffset', 'chromaticOffset')),
     ]
 
     const ppMotionFolder = ppFolder.addFolder('Motion blur')
     const ppMotionControls = [
-      ppMotionFolder.add(ppProxy, 'motionBlurEnabled').name('Enabled').onChange(ppPush('setMotionBlurEnabled')),
-      ppMotionFolder.add(ppProxy, 'motionBlurStrength', 0, 2, 0.01).name('Strength').onChange(ppPush('setMotionBlurStrength')),
+      ppMotionFolder.add(ppProxy, 'motionBlurEnabled').name('Enabled').onChange(ppPush('setMotionBlurEnabled', 'motionBlurEnabled')),
+      ppMotionFolder.add(ppProxy, 'motionBlurStrength', 0, 2, 0.01).name('Strength').onChange(ppPush('setMotionBlurStrength', 'motionBlurStrength')),
     ]
 
     const ppAllControls = [
@@ -317,9 +335,11 @@ export function WizardGui() {
     })
 
     // ── Background splat (Spark) ─────────────────────────────────────────────
+    // Note: `splatUniformScale` lives in the "Splat position + rotation"
+    // folder now so it sits next to the position sliders + gizmo (matches
+    // the collider folder's layout). Only flip-Y stays here.
     const splatFolder = gui.addFolder('Background splat (Spark)')
     tracked.push(
-      splatFolder.add(tAny, 'splatUniformScale', 0.05, 8, 0.01).name('Uniform scale').onChange(push('splatUniformScale')),
       splatFolder.add(tAny, 'splatFlipYOverride').name('Flip Y (splat only)').onChange(push('splatFlipYOverride')),
     )
 
@@ -599,6 +619,122 @@ export function WizardGui() {
       }
     })
 
+    // ── Per-world overrides ─────────────────────────────────────────────────
+    // Splat alignment, collider offset, and sparkle settings are
+    // remembered per URL slug. `setTuning` auto-saves changes into
+    // `worldOverrides[currentWorldSlug]` so every tweak persists
+    // across teleports without the user having to remember a button.
+    // These buttons are escape hatches:
+    //   • "Reset this world to authored defaults" — wipe the saved
+    //     overrides for the active world AND restore the global
+    //     slider fields to DEFAULT_WIZARD_TUNING values. Useful if
+    //     the user accidentally desynced the splat from the collider
+    //     and wants to start over.
+    //   • "Save snapshot for this world (manual)" — for the rare
+    //     case where the user wants to commit a momentary state
+    //     without further editing.
+    const worldFolder = gui.addFolder('World settings (per slug)')
+    const worldStatus = {
+      'Active world': useWizardTuning.getState().currentWorldSlug || '(unknown)',
+    }
+    const worldStatusCtl = worldFolder.add(worldStatus, 'Active world').disable()
+    const worldActions = {
+      'Save snapshot for this world': () => {
+        const slug = useWizardTuning.getState().currentWorldSlug
+        useWizardTuning.getState().saveCurrentSettingsForWorld(slug)
+        console.log(`[WizardGui] saved per-world overrides for "${slug}"`)
+      },
+      'Reset this world to defaults': () => {
+        const slug = useWizardTuning.getState().currentWorldSlug
+        // Clear the saved overrides, then re-apply (which now falls
+        // back to DEFAULT_WIZARD_TUNING for every per-world key).
+        useWizardTuning.getState().clearWorldOverrides(slug)
+        useWizardTuning.getState().applyWorldOverrides(slug)
+        console.log(`[WizardGui] cleared per-world overrides for "${slug}" + restored defaults`)
+      },
+    }
+    worldFolder.add(worldActions, 'Save snapshot for this world')
+    worldFolder.add(worldActions, 'Reset this world to defaults')
+    // Track the active-slug readout so it updates when the user
+    // teleports without having to refresh the GUI.
+    const unsubWorldSlug = useWizardTuning.subscribe((s, prev) => {
+      if (s.currentWorldSlug !== prev.currentWorldSlug) {
+        worldStatus['Active world'] = s.currentWorldSlug || '(unknown)'
+        worldStatusCtl.updateDisplay()
+      }
+    })
+
+    // ── Teleport trigger ─────────────────────────────────────────────────────
+    // AABB volume that swaps to a different world (route change) when
+    // the wizard walks into it. The volume lives in TeleportTrigger.tsx;
+    // these GUI controls write to the same `wizardTuning` fields the
+    // component reads, so changes are reflected live as the user
+    // tweaks placement.
+    const teleportFolder = gui.addFolder('Teleport')
+    const teleportControls: Array<{ updateDisplay: () => void }> = []
+    const refreshTeleportDisplay = () => teleportControls.forEach((c) => c.updateDisplay())
+
+    teleportControls.push(
+      teleportFolder.add(tAny, 'teleportEnabled').name('Enable').onChange(push('teleportEnabled')),
+      teleportFolder.add(tAny, 'teleportShowDebug').name('Show debug box').onChange(push('teleportShowDebug')),
+      teleportFolder.add(tAny, 'teleportTargetSlug').name('Target world slug').onChange(push('teleportTargetSlug')),
+      teleportFolder.add(tAny, 'teleportGizmoEnabled').name('3D gizmo').onChange(push('teleportGizmoEnabled')),
+      teleportFolder.add(tAny, 'teleportGizmoMode', ['translate', 'scale'])
+        .name('Gizmo mode').onChange(push('teleportGizmoMode')),
+    )
+    const teleportPosFolder = teleportFolder.addFolder('Position (world)')
+    teleportControls.push(
+      teleportPosFolder.add(tAny, 'teleportPosX', -200, 200, 0.1).name('X').onChange(push('teleportPosX')),
+      teleportPosFolder.add(tAny, 'teleportPosY', -50, 100, 0.1).name('Y').onChange(push('teleportPosY')),
+      teleportPosFolder.add(tAny, 'teleportPosZ', -200, 200, 0.1).name('Z').onChange(push('teleportPosZ')),
+      teleportFolder.add(tAny, 'teleportHalfSize', 0.25, 20, 0.05).name('Half-size (m)').onChange(push('teleportHalfSize')),
+    )
+
+    // Snap actions — convenience buttons so users don't have to type
+    // co-ordinates by hand. "Snap to cosmic swirl" reads the live
+    // portalPos values and copies them in; "Snap to character" mirrors
+    // the same affordance from the cosmic swirl folder so the user
+    // can quickly place a trigger right where they're standing.
+    const teleportSnapActions = {
+      'Snap to Cosmic Swirl': () => {
+        const s = useWizardTuning.getState()
+        useWizardTuning.getState().setTuning({
+          teleportPosX: s.portalPosX,
+          teleportPosY: s.portalPosY,
+          teleportPosZ: s.portalPosZ,
+        })
+      },
+      'Snap to character': () => {
+        useWizardTuning.getState().setTuning({
+          teleportPosX: wizardFeetPos.x,
+          teleportPosY: wizardFeetPos.y + 1,
+          teleportPosZ: wizardFeetPos.z,
+        })
+      },
+    }
+    teleportControls.push(
+      teleportFolder.add(teleportSnapActions, 'Snap to Cosmic Swirl'),
+      teleportFolder.add(teleportSnapActions, 'Snap to character'),
+    )
+    tracked.push(...teleportControls)
+
+    // Mirror gizmo / snap-button writes back into the slider readouts.
+    // The TeleportTrigger writes to the store on every drag tick via
+    // `setTuning`, so without this the GUI numbers would lag the
+    // actual proxy position.
+    const unsubTeleport = useWizardTuning.subscribe((s, prev) => {
+      const keys: Array<keyof WizardTuning> = [
+        'teleportEnabled', 'teleportShowDebug', 'teleportTargetSlug',
+        'teleportGizmoEnabled', 'teleportGizmoMode',
+        'teleportPosX', 'teleportPosY', 'teleportPosZ',
+        'teleportHalfSize',
+      ]
+      if (keys.some((k) => s[k] !== prev[k])) {
+        for (const k of keys) tAny[k] = s[k]
+        refreshTeleportDisplay()
+      }
+    })
+
     // ── Creatures ────────────────────────────────────────────────────────────
     // One subfolder per entry in CREATURE_CONFIGS. Each subfolder binds to a
     // per-slug snapshot of the creature's transform (lil-gui mutates the
@@ -757,6 +893,13 @@ export function WizardGui() {
       splatOffsetFolder.add(tAny, 'splatRotationDegX', -180, 180, 0.5).name('Rot X (°)').onChange(push('splatRotationDegX')),
       splatOffsetFolder.add(tAny, 'splatRotationDegY', -180, 180, 0.5).name('Rot Y (°)').onChange(push('splatRotationDegY')),
       splatOffsetFolder.add(tAny, 'splatRotationDegZ', -180, 180, 0.5).name('Rot Z (°)').onChange(push('splatRotationDegZ')),
+      // Uniform scale — placed right next to position so the user
+      // doesn't have to hunt for it in the Splat performance folder.
+      // Same role as the collider's "Scale (uniform)" slider: a
+      // multiplier on top of the world-manifest's authored size.
+      // The 3D gizmo in scale mode also writes here, so dragging
+      // and slider stay in sync.
+      splatOffsetFolder.add(tAny, 'splatUniformScale', 0.05, 8, 0.01).name('Scale (uniform)').onChange(push('splatUniformScale')),
     ]
     tracked.push(...splatOffsetTracked)
     const refreshSplatOffsetDisplay = () => splatOffsetTracked.forEach((c) => c.updateDisplay())
@@ -768,7 +911,8 @@ export function WizardGui() {
         s.splatOffsetZ !== prev.splatOffsetZ ||
         s.splatRotationDegX !== prev.splatRotationDegX ||
         s.splatRotationDegY !== prev.splatRotationDegY ||
-        s.splatRotationDegZ !== prev.splatRotationDegZ
+        s.splatRotationDegZ !== prev.splatRotationDegZ ||
+        s.splatUniformScale !== prev.splatUniformScale
       ) {
         tAny.splatOffsetX = s.splatOffsetX
         tAny.splatOffsetY = s.splatOffsetY
@@ -776,6 +920,7 @@ export function WizardGui() {
         tAny.splatRotationDegX = s.splatRotationDegX
         tAny.splatRotationDegY = s.splatRotationDegY
         tAny.splatRotationDegZ = s.splatRotationDegZ
+        tAny.splatUniformScale = s.splatUniformScale
         refreshSplatOffsetDisplay()
       }
     })
@@ -792,6 +937,10 @@ export function WizardGui() {
           splatRotationDegX: 0,
           splatRotationDegY: 0,
           splatRotationDegZ: 0,
+          // Scale resets to 1.0 (no multiplier) rather than 0,
+          // since 0 would collapse the splat to a point and the
+          // user would think "Reset" had nuked their world.
+          splatUniformScale: 1,
         }
         Object.assign(tAny, zeros)
         useWizardTuning.getState().setTuning(zeros)
@@ -808,6 +957,22 @@ export function WizardGui() {
       colliderOffsetFolder.add(tAny, 'colliderOffsetX', -50, 50, 0.05).name('X').onChange(push('colliderOffsetX')),
       colliderOffsetFolder.add(tAny, 'colliderOffsetY', -50, 50, 0.05).name('Y (up)').onChange(push('colliderOffsetY')),
       colliderOffsetFolder.add(tAny, 'colliderOffsetZ', -50, 50, 0.05).name('Z').onChange(push('colliderOffsetZ')),
+      // Uniform scale slider — multiplies into the world's authored
+      // metricScaleFactor. Default 1 = world's authored size. Bump up
+      // when the user scaled the SPZ via the Splat scale slider and
+      // the trimesh fell behind. NB: every change rebuilds the BVH
+      // (a few seconds for dense colliders), so the recommended
+      // workflow is "drag, wait, walk" rather than continuous tuning.
+      colliderOffsetFolder.add(tAny, 'colliderUniformScale', 0.1, 10, 0.01).name('Scale (uniform)').onChange(push('colliderUniformScale')),
+      // Visual gizmo — TransformControls drives a proxy group that
+      // mirrors its position back into colliderOffsetX/Y/Z via
+      // setTuning. Translate-only by design (the WorldCollider
+      // component hard-codes mode="translate" because rotate/scale
+      // would force a BVH rebuild every gizmo tick). The user keeps
+      // the slider for scale and the offset sliders for fine X/Y/Z
+      // tweaks; the gizmo is for "drag the whole collider near the
+      // splat" macro adjustments.
+      colliderOffsetFolder.add(tAny, 'colliderGizmoEnabled').name('Show gizmo (translate)').onChange(push('colliderGizmoEnabled')),
     ]
     tracked.push(...colliderOffsetTracked)
     colliderOffsetFolder.add({
@@ -815,14 +980,16 @@ export function WizardGui() {
         tAny.colliderOffsetX = 0
         tAny.colliderOffsetY = 0
         tAny.colliderOffsetZ = 0
+        tAny.colliderUniformScale = 1
         useWizardTuning.getState().setTuning({
           colliderOffsetX: 0,
           colliderOffsetY: 0,
           colliderOffsetZ: 0,
+          colliderUniformScale: 1,
         })
         refreshOffsetDisplay()
       },
-    }, 'reset').name('Reset to 0,0,0')
+    }, 'reset').name('Reset position + scale')
 
     // ── Physics debug (Rapier) ───────────────────────────────────────────────
     const dbgFolder = gui.addFolder('Physics debug (Rapier)')
@@ -880,6 +1047,8 @@ export function WizardGui() {
       unsubSplatPerfTuning()
       unsubSparkle()
       unsubPortal()
+      unsubTeleport()
+      unsubWorldSlug()
       unsubCreatures()
       unsubPP()
       unsubSplatBoost()

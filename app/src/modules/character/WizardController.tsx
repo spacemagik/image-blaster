@@ -37,6 +37,10 @@ import { useWizardTuning } from './wizardTuning'
 // component file brings back vite-plugin-react's "incompatible export" warning
 // and the cascading invalidations that come with it.
 import { wizardFeetPos } from './wizardState'
+import {
+  clearPlayerWorldPosition,
+  setPlayerWorldPosition,
+} from './playerPositionRegistry'
 
 const WIZARD_URL = '/silo.glb'
 
@@ -405,6 +409,15 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       if (resetToken > 0) reset()
     }, [resetToken, reset])
 
+    // Drop the registered player position when the controller unmounts.
+    // This prevents a teleport / world-swap from carrying the wizard's
+    // last position in the old world into the new one, which would
+    // otherwise instantly re-fire a TeleportTrigger that happens to
+    // overlap that coordinate.
+    useEffect(() => {
+      return () => clearPlayerWorldPosition()
+    }, [])
+
     // After a dogHeight change re-mounts the RigidBody, drop the camera-follow seed
     // and animation state so the new spawn doesn't trigger a huge feet-delta camera jump.
     useEffect(() => {
@@ -682,6 +695,12 @@ export const WizardController = forwardRef<WizardControllerHandle>(
       const after = body.translation()
       _feet.set(after.x, after.y - centerYOffset, after.z)
       wizardFeetPos.copy(_feet)
+      // Publish the feet position to the shared registry so trigger
+      // volumes (TeleportTrigger, future AI proximity triggers,
+      // ambient-sound panners) can react to wizard movement without
+      // having to walk the React tree to find this component. Cheap
+      // — a single vec3.copy() per frame.
+      setPlayerWorldPosition(_feet)
       if (!prevFeetSeededRef.current) {
         _prevFeet.copy(_feet)
         prevFeetSeededRef.current = true

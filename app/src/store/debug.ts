@@ -176,6 +176,157 @@ interface DebugStore {
   togglePlayMode: () => void
 }
 
+/** Fields in `useDebugStore` that are remembered PER WORLD by the
+ *  wizardTuning store. The tuning store maintains a parallel
+ *  `worldDebugOverrides[slug]` snapshot for each of these; on every
+ *  edit through the WizardGui PP folder we write to BOTH the live
+ *  debug store (so PostProcessing.tsx sees the change immediately)
+ *  AND the tuning store's snapshot (so the value survives a world
+ *  swap). On slug change, `applyDebugOverrides` below replays the
+ *  saved snapshot back into the debug store.
+ *
+ *  Why mirror two stores instead of moving these fields into
+ *  wizardTuning?
+ *    PostProcessing.tsx already reads from useDebugStore via 20+
+ *    selectors and a long subscribe pipeline (it sizes shader
+ *    uniforms, swaps EffectComposer passes, etc.). Migrating that
+ *    component to a different store risks breaking the entire
+ *    post-processing chain — and the user is mid-iteration and
+ *    can't afford a regression. The mirror approach is one extra
+ *    cheap call per slider edit and one extra setState batch on
+ *    slug change. */
+export const PER_WORLD_DEBUG_KEYS = [
+  'bloomEnabled',
+  'bloomIntensity',
+  'bloomThreshold',
+  'bloomSmoothing',
+  'brightnessContrastEnabled',
+  'brightness',
+  'contrast',
+  'vignetteEnabled',
+  'vignetteDarkness',
+  'vignetteOffset',
+  'toneMappingEnabled',
+  'toneMappingMode',
+  'exposure',
+  'dofPostEnabled',
+  'dofPostFocusDistance',
+  'dofPostFocalLength',
+  'dofPostBokehScale',
+  'colorGradeEnabled',
+  'hue',
+  'saturation',
+  'chromaticEnabled',
+  'chromaticOffset',
+  'motionBlurEnabled',
+  'motionBlurStrength',
+] as const satisfies readonly (keyof DebugStore)[]
+
+export type PerWorldDebugKey = (typeof PER_WORLD_DEBUG_KEYS)[number]
+
+/** Setter-name lookup so `applyDebugOverrides` can call the right
+ *  store action for each field. Hand-typed (rather than synthesised
+ *  from the key name with `set${capitalised}`) for TypeScript safety:
+ *  a typo in either the key or the setter name surfaces here at
+ *  build time, not at runtime when the user moves a slider. */
+export const PER_WORLD_DEBUG_SETTERS: Record<PerWorldDebugKey, keyof DebugStore> = {
+  bloomEnabled: 'setBloomEnabled',
+  bloomIntensity: 'setBloomIntensity',
+  bloomThreshold: 'setBloomThreshold',
+  bloomSmoothing: 'setBloomSmoothing',
+  brightnessContrastEnabled: 'setBrightnessContrastEnabled',
+  brightness: 'setBrightness',
+  contrast: 'setContrast',
+  vignetteEnabled: 'setVignetteEnabled',
+  vignetteDarkness: 'setVignetteDarkness',
+  vignetteOffset: 'setVignetteOffset',
+  toneMappingEnabled: 'setToneMappingEnabled',
+  toneMappingMode: 'setToneMappingMode',
+  exposure: 'setExposure',
+  dofPostEnabled: 'setDofPostEnabled',
+  dofPostFocusDistance: 'setDofPostFocusDistance',
+  dofPostFocalLength: 'setDofPostFocalLength',
+  dofPostBokehScale: 'setDofPostBokehScale',
+  colorGradeEnabled: 'setColorGradeEnabled',
+  hue: 'setHue',
+  saturation: 'setSaturation',
+  chromaticEnabled: 'setChromaticEnabled',
+  chromaticOffset: 'setChromaticOffset',
+  motionBlurEnabled: 'setMotionBlurEnabled',
+  motionBlurStrength: 'setMotionBlurStrength',
+}
+
+/** Shipped defaults for every PP knob, used as the fall-back when a
+ *  world has NO saved override for that key. Kept in sync with the
+ *  store's initial values (a sanity-check test in debug.test.ts
+ *  would be a good follow-up). */
+export const DEFAULT_PER_WORLD_DEBUG_VALUES: Record<PerWorldDebugKey, unknown> = {
+  bloomEnabled: true,
+  bloomIntensity: 0.8,
+  bloomThreshold: 0.85,
+  bloomSmoothing: 0.9,
+  brightnessContrastEnabled: false,
+  brightness: 0,
+  contrast: 0,
+  vignetteEnabled: false,
+  vignetteDarkness: 0.5,
+  vignetteOffset: 0.5,
+  toneMappingEnabled: true,
+  toneMappingMode: 'ACES_FILMIC' as ToneMappingModeName,
+  exposure: 1,
+  dofPostEnabled: false,
+  dofPostFocusDistance: 0.02,
+  dofPostFocalLength: 0.05,
+  dofPostBokehScale: 2.0,
+  colorGradeEnabled: false,
+  hue: 0,
+  saturation: 0,
+  chromaticEnabled: false,
+  chromaticOffset: 0.0008,
+  motionBlurEnabled: false,
+  motionBlurStrength: 0.3,
+}
+
+/** Replay a per-world snapshot back into `useDebugStore`. Missing
+ *  keys fall back to `DEFAULT_PER_WORLD_DEBUG_VALUES` so a world
+ *  without overrides reverts to the shipped baseline (otherwise
+ *  the PREVIOUS world's tuning would leak into the new one).
+ *
+ *  Calls each setter individually rather than batch-setting because
+ *  the store's setters are individual `set({ key })` calls — there
+ *  isn't a multi-field setter, and batching wouldn't change anything
+ *  visible (react-three-fiber renders on requestAnimationFrame
+ *  regardless of how many setState calls fired in this tick). */
+export function applyDebugOverrides(
+  overrides: Partial<Record<PerWorldDebugKey, unknown>>,
+): void {
+  const state = useDebugStore.getState()
+  for (const key of PER_WORLD_DEBUG_KEYS) {
+    const value = key in overrides
+      ? overrides[key]
+      : DEFAULT_PER_WORLD_DEBUG_VALUES[key]
+    const setterName = PER_WORLD_DEBUG_SETTERS[key]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const setter = (state as any)[setterName]
+    if (typeof setter === 'function') setter(value)
+  }
+}
+
+/** Snapshot the CURRENT debug-store values for every per-world key.
+ *  Used by App.tsx on first mount (before any user edits) to seed
+ *  the active world's overrides with what the user is already
+ *  looking at — otherwise switching to the OTHER world would
+ *  silently reset the PP they'd carefully tuned. */
+export function snapshotCurrentDebugOverrides(): Record<PerWorldDebugKey, unknown> {
+  const state = useDebugStore.getState()
+  const snap = {} as Record<PerWorldDebugKey, unknown>
+  for (const key of PER_WORLD_DEBUG_KEYS) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    snap[key] = (state as any)[key]
+  }
+  return snap
+}
+
 export const useDebugStore = create<DebugStore>()(
   persist(
     (set) => ({

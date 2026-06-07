@@ -16,6 +16,7 @@ import { ObjectGrid } from '../modules/scene/ObjectGrid'
 import { SparkleScene } from '../modules/sparkle/SparkleScene'
 import { PortalScene } from '../modules/portal/PortalScene'
 import { CreaturesScene } from '../modules/creatures/CreaturesScene'
+import { TeleportTrigger } from '../modules/teleport/TeleportTrigger'
 import { PlacementEditorOverlay, PlacementEditorScene, usePlacementEditor } from '../modules/scene/PlacementEditor'
 import { OriginHelper } from '../modules/scene/OriginHelper'
 import { AudioManager } from '../modules/audio/AudioManager'
@@ -128,6 +129,12 @@ interface Props {
   hoveredObjectInstanceId?: string | null
   editing?: boolean
   uiVisible?: boolean
+  /** True once the user has clicked PLAY on the StartScreen overlay.
+   *  Used to gate debug overlays (WizardGui) so they don't bleed
+   *  through the title screen during asset preload. The 3D Canvas
+   *  itself stays mounted under the StartScreen the whole time —
+   *  it's only the DOM panels (lil-gui, etc.) that we hide. */
+  started?: boolean
   onObjectHover?: (asset: WorldObjectAsset, hovering: boolean, instanceId?: string) => void
   onSceneProjectSaved?: (project: WorldSceneProject) => void
 }
@@ -145,6 +152,7 @@ export function WorldViewer({
   hoveredObjectInstanceId,
   editing = false,
   uiVisible = true,
+  started = true,
   onObjectHover,
   onSceneProjectSaved,
 }: Props) {
@@ -228,6 +236,11 @@ export function WorldViewer({
   const colliderOffsetX = useWizardTuning((s) => s.colliderOffsetX)
   const colliderOffsetY = useWizardTuning((s) => s.colliderOffsetY)
   const colliderOffsetZ = useWizardTuning((s) => s.colliderOffsetZ)
+  // User-overridable collider scale — multiplied into the world's
+  // authored metricScaleFactor below. Per-world (saved in
+  // wizardTuning.worldOverrides[slug]) so each world's collider can
+  // match its splat without bleeding into the other worlds.
+  const colliderUniformScale = useWizardTuning((s) => s.colliderUniformScale)
   const objectPlacements = sceneProject?.instances ?? placementEditor.instances
   const objectPhysicsAssets = sceneProject?.instances.length ? allObjectAssets : desiredObjectAssets
   const activeControllerMode = editing ? 'fly' : controllerMode
@@ -268,7 +281,12 @@ export function WorldViewer({
                     url={colliderUrl}
                     flipY={flipY}
                     groundPlaneOffset={activeGroundPlaneOffset}
-                    metricScaleFactor={activeMetricScaleFactor}
+                    /* Multiply user-override INTO the authored scale.
+                     * This way `metricScaleFactor` keeps its meaning
+                     * ("the world's intended size in metres") and the
+                     * slider is a pure delta on top. Default 1 leaves
+                     * worlds at their authored scale. */
+                    metricScaleFactor={activeMetricScaleFactor * colliderUniformScale}
                     shadowOpacity={activeShadowCatcherOpacity}
                     shadowColor={activeShadowCatcherColor}
                     offsetX={colliderOffsetX}
@@ -352,6 +370,7 @@ export function WorldViewer({
           <SparkleScene />
           <PortalScene />
           <CreaturesScene />
+          <TeleportTrigger />
           <OriginHelper />
           {/* PostProcessing wraps the ENTIRE scene render — splats,
               GLB objects, character, sky/HDRI, sparkles, portal. Used
@@ -363,7 +382,11 @@ export function WorldViewer({
           <PostProcessing />
         </Suspense>
       </Canvas>
-      {uiVisible && activeControllerMode === 'wizard' && <WizardGui />}
+      {/* WizardGui is gated on `started` (not just `uiVisible`) so it
+       *  doesn't appear over the title screen during asset preload.
+       *  `editing` bypass: the placement editor never goes through
+       *  the start screen, so editing implies started. */}
+      {uiVisible && activeControllerMode === 'wizard' && (started || editing) && <WizardGui />}
       {editing && uiVisible && <PlacementEditorOverlay controller={placementEditor} />}
     </>
   )

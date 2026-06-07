@@ -1,0 +1,18 @@
+# Dependencies & build output (reinstall / rebuild after sharing)
+node_modules/
+dist/
+
+# Vite
+.vite/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+
+# Logs & env
+*.log
+.env
+.env.*
+
+# Optional local tooling
+.idea/

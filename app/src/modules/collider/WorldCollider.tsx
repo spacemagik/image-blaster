@@ -1,6 +1,6 @@
-import { useMemo, useEffect, useRef } from 'react'
+import { useMemo, useEffect, useRef, useState, useCallback } from 'react'
 import { RigidBody, type RapierRigidBody } from '@react-three/rapier'
-import { useGLTF } from '@react-three/drei'
+import { TransformControls, useGLTF } from '@react-three/drei'
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import * as THREE from 'three'
 import { useDebugStore } from '../../store/debug'
@@ -8,6 +8,7 @@ import { ObjectRenderMode, WorldRenderMode } from '../../types/world'
 import { useAssetMaterials } from '../scene/useAssetMaterials'
 import { DROP_TARGET_LAYER } from '../scene/dropTargets'
 import { shadowCatcherColor, shadowCatcherOpacity } from '../scene/shadows'
+import { useWizardTuning } from '../character/wizardTuning'
 
 interface Props {
   url: string
@@ -35,6 +36,13 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
   const { scene: rawScene } = useGLTF(url)
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const worldRenderMode = useDebugStore((s) => s.worldRenderMode)
+  // Gizmo subscribes here (not via prop) because the toggle is
+  // independent of the alignment props plumbed from WorldViewer and
+  // we don't want to widen every WorldCollider call site for a
+  // debug-only feature. Reads are cheap (zustand selectors are
+  // ref-equality short-circuited) so this doesn't cost re-renders
+  // unless the boolean actually flips.
+  const gizmoEnabled = useWizardTuning((s) => s.colliderGizmoEnabled)
   const { wireframeMaterial, shadedMaterial, wireframeOverlayMaterial } = useAssetMaterials()
   const normalizedGroundPlaneOffset = groundPlaneOffset ?? 0
   const normalizedMetricScaleFactor = metricScaleFactor ?? 1
@@ -53,6 +61,32 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
     normalizedOffsetZ,
   ]
   const visualPosition: [number, number, number] = initialBodyPosition
+
+  // Gizmo proxy: an invisible group at the same world-space position
+  // as the collider body. TransformControls drives this proxy, and
+  // `handleGizmoChange` mirrors its position back into the wizard-
+  // tuning store. The collider's existing live-update `useEffect`
+  // (calls `setTranslation` on the RigidBody) picks up the store
+  // change and moves the actual physics body — no BVH rebuild,
+  // because translation is decoupled from the trimesh key.
+  // useState (not useRef) because TransformControls' `object` prop
+  // needs to trigger a re-render when the proxy mounts so the gizmo
+  // can attach on the same frame.
+  const [gizmoProxy, setGizmoProxy] = useState<THREE.Group | null>(null)
+  const handleGizmoChange = useCallback(() => {
+    const g = gizmoProxy
+    if (!g) return
+    // Subtract ground plane offset because that piece is authored in
+    // the world manifest, not a user knob. We only want to write the
+    // user-controlled delta back into the store; otherwise dragging
+    // would slowly drift the offset by `groundPlaneOffset` each time
+    // the gizmo re-snaps to the proxy's world position.
+    useWizardTuning.getState().setTuning({
+      colliderOffsetX: g.position.x,
+      colliderOffsetY: g.position.y - normalizedGroundPlaneOffset,
+      colliderOffsetZ: g.position.z,
+    })
+  }, [gizmoProxy, normalizedGroundPlaneOffset])
 
   // Live-update the fixed body's translation when the GUI offset sliders change.
   // setTranslation reuses the existing collider/BVH so trimesh stays mounted.
@@ -165,6 +199,21 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
           rotation={[normalizedRotation, 0, 0]}
           position={visualPosition}
           scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
+        />
+      )}
+      {/* Gizmo proxy lives OUTSIDE the RigidBody — TransformControls
+       *  can only drive a plain Object3D, not a rapier body, so we
+       *  use a separate <group> at the same world position and mirror
+       *  it back into the store. The group renders nothing visible
+       *  itself (no children); only the TransformControls handles
+       *  draw. We position the proxy via the same arithmetic the body
+       *  uses so the gizmo snaps to the collider exactly. */}
+      <group ref={setGizmoProxy} position={visualPosition} />
+      {gizmoEnabled && gizmoProxy && (
+        <TransformControls
+          object={gizmoProxy}
+          mode="translate"
+          onObjectChange={handleGizmoChange}
         />
       )}
     </>

@@ -6,8 +6,11 @@ import { BottomLeftControls, ViewerModeHotkeys } from './components/BottomLeftCo
 import { TouchControls } from './components/TouchControls'
 import { StartScreen } from './components/StartScreen'
 import { useSceneProject } from './modules/scene/useSceneProject'
-import { fetchWorlds, loadWorlds } from './utils/worldLoader'
+import { fetchWorlds, getSplatUrl, loadWorlds } from './utils/worldLoader'
+import { prefetchOtherSplats } from './utils/splatPreloader'
+import { applyDebugOverrides, snapshotCurrentDebugOverrides } from './store/debug'
 import { useDebugStore } from './store/debug'
+import { useWizardTuning } from './modules/character/wizardTuning'
 import { isEditableTarget } from './utils/dom'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset } from './types/world'
 import { TerminalWindowIcon, XIcon } from '@phosphor-icons/react'
@@ -116,6 +119,68 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
     setHoveredWorldPreview(null)
   }, [entry.slug])
 
+  // Per-world overrides: tell the tuning store which slug is now
+  // active so any per-world keys (splat alignment, sparkle preset,
+  // collider offset) swap to that world's saved values. Without
+  // this, teleporting between fantasy2 and hell-cave would leave
+  // the previous world's splat scale / sparkle / etc. applied to
+  // the new one. `setCurrentWorldSlug` is no-op when the slug is
+  // unchanged so calling it on every slug-effect run is safe.
+  // Note: this runs AFTER the wouter route updates, which is what
+  // changes `entry.slug` here — so the SplatRenderer subscribers
+  // see the new offsets on the same render pass that picks up the
+  // new world entry, avoiding a "frame of stale alignment".
+  useEffect(() => {
+    // Order matters here:
+    //   1. Seed the active world's PP snapshot ONCE per slug. If
+    //      this is the first time the user has visited this world
+    //      since the per-world PP system shipped (v68), capture
+    //      whatever PP values are currently live in useDebugStore
+    //      into worldDebugOverrides[slug]. This means the user's
+    //      existing tuning is preserved as "what THIS world should
+    //      look like" — without it, hopping to another world would
+    //      overwrite the global PP and silently destroy their
+    //      tuning. The seed action is a no-op if the world already
+    //      has a snapshot (so subsequent visits don't re-capture
+    //      stale post-other-world-edits values).
+    //   2. Tell the tuning store the new slug. This atomically
+    //      applies any saved per-world wizardTuning fields
+    //      (lighting, sparkle, alignment, etc.).
+    //   3. Replay the new world's PP snapshot into useDebugStore.
+    //      Missing keys fall back to shipped defaults so a brand-
+    //      new world starts at the baseline look.
+    const tuning = useWizardTuning.getState()
+    tuning.seedDebugOverridesForWorld(entry.slug, snapshotCurrentDebugOverrides())
+    tuning.setCurrentWorldSlug(entry.slug)
+    const overrides = useWizardTuning.getState().worldDebugOverrides[entry.slug] ?? {}
+    applyDebugOverrides(overrides)
+  }, [entry.slug])
+
+  // SPZ background prefetch — once the player has clicked PLAY and the
+  // active world's splat is decoding, kick off low-priority HTTP
+  // fetches for the OTHER worlds' SPZ files. The browser commits the
+  // bytes to its HTTP cache, so a later teleport doesn't have to
+  // re-download 200-350 MB. See `splatPreloader.ts` for why we
+  // only cache bytes (not decoded splats — Spark's WASM heap can't
+  // hold two big SPZs at once).
+  //
+  // Gated on `started` so the prefetch doesn't compete with the
+  // ACTIVE world's initial decode during the StartScreen — the user
+  // is already staring at the title; let the active world finish
+  // first, then start pre-warming hell-cave in the background.
+  // The 8s delay inside `prefetchOtherSplats` adds further headroom.
+  useEffect(() => {
+    if (!started) return
+    const allUrls = worlds
+      .map((w) => {
+        const world = w.world ?? w.worldVersions[w.worldVersions.length - 1]?.world
+        return world ? getSplatUrl(world) : ''
+      })
+      .filter((u): u is string => !!u)
+    const activeUrl = activeWorld ? getSplatUrl(activeWorld) : ''
+    prefetchOtherSplats(allUrls, activeUrl)
+  }, [started, worlds, activeWorld])
+
   const handleObjectHover = useCallback((asset: WorldObjectAsset, hovering: boolean, instanceId?: string) => {
     setHoveredObjectAssetId((current) => {
       if (hovering) return asset.assetId
@@ -183,6 +248,10 @@ function LoadedApp({ worlds }: { worlds: WorldEntry[] }) {
         hoveredObjectInstanceId={hoveredObjectInstanceId}
         editing={editing}
         uiVisible={uiVisible}
+        /* Pass through the StartScreen gate so WorldViewer can hide
+         * debug UI (WizardGui) during the title sequence. The Canvas
+         * + scene tree still mount underneath so assets preload. */
+        started={started}
         onObjectHover={handleObjectHover}
         onSceneProjectSaved={updateSceneProject}
       />

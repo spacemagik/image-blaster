@@ -87,6 +87,13 @@ export function SplatRenderer({
     const splatRotDegX = useWizardTuning((s) => s.splatRotationDegX)
     const splatRotDegY = useWizardTuning((s) => s.splatRotationDegY)
     const splatRotDegZ = useWizardTuning((s) => s.splatRotationDegZ)
+    // User-overridable splat uniform scale. Same pattern as the
+    // collider's `colliderUniformScale`: a multiplier on top of the
+    // world-manifest's authored `metricScaleFactor` (applied on the
+    // outer group). Default 1.0 = world's authored size; bump up
+    // to scale the SPZ larger than its authored bounds. Per-world
+    // so each scene remembers its own value.
+    const splatUniformScale = useWizardTuning((s) => s.splatUniformScale)
     const splatGizmoEnabled = useWizardTuning((s) => s.splatGizmoEnabled)
     const splatGizmoMode = useWizardTuning((s) => s.splatGizmoMode)
 
@@ -97,6 +104,13 @@ export function SplatRenderer({
     // TransformControls writes directly into the Object3D it controls. After each
     // change we sync that transform back into the persisted store so the matching
     // GUI sliders update and the value survives a refresh.
+    //
+    // Scale is uniform-only (we use `scale.x` and broadcast it to the
+    // numerical slider). If the user toggles the gizmo to scale mode
+    // and pulls one axis, we still write back a single uniform value
+    // because (a) the visible scale prop is a single number, and
+    // (b) the GUI exposes a single "Uniform scale" slider, not 3.
+    // Drag the gizmo's centre cube for the truest uniform scaling.
     const handleGizmoChange = useCallback(() => {
       const g = splatOffsetNode
       if (!g) return
@@ -107,6 +121,7 @@ export function SplatRenderer({
         splatRotationDegX: THREE.MathUtils.radToDeg(g.rotation.x),
         splatRotationDegY: THREE.MathUtils.radToDeg(g.rotation.y),
         splatRotationDegZ: THREE.MathUtils.radToDeg(g.rotation.z),
+        splatUniformScale: g.scale.x,
       })
     }, [splatOffsetNode])
 
@@ -333,6 +348,15 @@ export function SplatRenderer({
                 THREE.MathUtils.degToRad(splatRotDegY),
                 THREE.MathUtils.degToRad(splatRotDegZ),
               ]}
+              /* Uniform scale multiplier from the GUI slider. Stacks
+               * MULTIPLICATIVELY on the outer group's `metricScaleFactor`
+               * (the world-manifest authored size). Default 1.0 leaves
+               * the splat at its authored scale; sliding away from 1
+               * is how the user matches a splat to a manually-resized
+               * collider. The gizmo in scale mode also writes here
+               * (via handleGizmoChange) so dragging and slider are
+               * round-trip equivalent. */
+              scale={splatUniformScale}
             >
               <SplatMeshEl ref={splatRef} args={[splatArgs]} />
             </group>

@@ -168,6 +168,26 @@ export interface WizardTuning {
   colliderOffsetX: number
   colliderOffsetY: number
   colliderOffsetZ: number
+  /** Visual gizmo for the collider. Renders a TransformControls in
+   *  translate mode that drives `colliderOffsetX/Y/Z`. Off by default
+   *  so it doesn't clutter the scene; toggled from the "Collider
+   *  position offset" GUI folder. Translate-only because rotation +
+   *  scale would rebuild the trimesh BVH every drag tick. Scale is
+   *  exposed via the dedicated slider where remounts happen once on
+   *  mouse-up rather than per-frame. */
+  colliderGizmoEnabled: boolean
+  /** User-facing collider uniform scale, multiplied INTO the world's
+   *  authored `metricScaleFactor` at render time. Default 1.0 = no
+   *  change (use the world's authored scale as-is); >1 scales the
+   *  physics collider larger to match a splat the user scaled up
+   *  via `splatUniformScale`; <1 shrinks it. Per-world so each
+   *  world remembers its own splat/collider match. Note: changing
+   *  this rebuilds the trimesh BVH (a few seconds for dense
+   *  colliders) because Rapier can't resize an existing trimesh —
+   *  the RigidBody remounts with the new scale baked in. Keep this
+   *  in mind if you're sliding the slider live; settle on a value
+   *  before walking around. */
+  colliderUniformScale: number
 
   // Splat (SPZ) position + rotation offset (image-blaster addition).
   // Mirrors the collider offset but applies to the visible Gaussian splat. Useful when
@@ -443,6 +463,243 @@ export interface WizardTuning {
    *  schema bump — the migration seeds missing slugs from
    *  `defaultCreatureTransforms()` on hydrate. */
   creatures: Record<string, CreatureTransform>
+
+  // ── Per-world overrides ───────────────────────────────────────────────
+  // Some settings (splat alignment, sparkle preset, etc.) need to be
+  // remembered PER WORLD rather than globally — each world has its
+  // own SPZ + collider geometry and authored frame, so a splat offset
+  // that aligns world A wrecks alignment for world B. Without this,
+  // editing the splat in hell-cave silently corrupts fantasy2 the
+  // next time the user teleports back.
+  //
+  // Mechanism (see `PER_WORLD_KEYS` and `applyWorldOverrides` below):
+  //   - On slug change, App.tsx calls `applyWorldOverrides(slug)`
+  //     which copies `worldOverrides[slug]` into the global slider
+  //     fields. Missing keys fall back to DEFAULT_WIZARD_TUNING (so
+  //     a brand-new world starts at the as-authored alignment).
+  //   - When the user changes a per-world slider, `setTuning` also
+  //     writes that key into `worldOverrides[currentWorldSlug]` so
+  //     the change persists across world swaps.
+  //
+  // Stored as `Partial<WizardTuning>` per slug rather than the full
+  // shape so adding new per-world keys later doesn't require a
+  // schema bump (any keys not present fall back to the global default).
+  worldOverrides: Record<string, Partial<WizardTuning>>
+  /** Per-world snapshots for the SUBSET of `useDebugStore` fields
+   *  that the WizardGui's Post-processing folder writes to (bloom,
+   *  vignette, tone mapping, DoF, colour grade, chromatic, motion
+   *  blur, brightness/contrast). The PP knobs live in `useDebugStore`
+   *  because PostProcessing.tsx reads them via 20+ subscribers and
+   *  moving the field set into wizardTuning would require rewriting
+   *  the entire composer pipeline. Instead, we mirror writes: every
+   *  PP-slider edit goes to BOTH stores, and on world swap we replay
+   *  the per-world snapshot back into `useDebugStore` via the
+   *  `applyDebugOverrides` helper (see store/debug.ts).
+   *
+   *  Stored as a flat key→value map per slug, keys typed against the
+   *  exported `PerWorldDebugKey` union from debug.ts. Adding a new
+   *  per-world PP knob = add the key to `PER_WORLD_DEBUG_KEYS` and
+   *  `PER_WORLD_DEBUG_SETTERS` in debug.ts; no schema bump here
+   *  (this map is `Partial<...>` so missing keys fall back to
+   *  shipped defaults in `applyDebugOverrides`). */
+  worldDebugOverrides: Record<string, Partial<Record<string, unknown>>>
+  /** Current active world slug. Synced from the wouter route in
+   *  App.tsx via a setter. Used by `setTuning` to know which slot
+   *  in `worldOverrides` to write per-world keys into. */
+  currentWorldSlug: string
+
+  // ── Teleport trigger ──────────────────────────────────────────────────
+  // An invisible AABB volume that, when the wizard's feet enter it,
+  // calls wouter `setLocation('/<teleportTargetSlug>')` to swap worlds.
+  // The mechanism is route-based (each world is its own `/:slug`
+  // route in App.tsx) which means the old world's splat + creatures
+  // + audio fully unmount on transition — no double-loaded VRAM, no
+  // mixed-state weirdness. Used as the "walk into the cosmic swirl
+  // to enter the hell-cave" portal.
+  /** Master toggle. When false the trigger never fires + the debug
+   *  visualizer is hidden. Lets the user turn off teleportation
+   *  while editing placement without ripping out the box. */
+  teleportEnabled: boolean
+  /** URL slug to navigate to when triggered. E.g. 'hell-cave' →
+   *  setLocation('/hell-cave'). String-typed so the user can add new
+   *  worlds without a code change here; the wouter route handler
+   *  resolves the slug → WorldEntry via the existing worldLoader
+   *  pipeline. */
+  teleportTargetSlug: string
+  /** AABB centre in world space. Defaults near the cosmic swirl's
+   *  default spawn; the "Snap to Cosmic Swirl" GUI button copies
+   *  portalPos* into these. The user is expected to drag this with
+   *  the gizmo to fine-tune placement. */
+  teleportPosX: number
+  teleportPosY: number
+  teleportPosZ: number
+  /** AABB half-extent (so total edge length = 2 × this). Half-extent
+   *  rather than full so the in-frame "inside the box?" test is just
+   *  `abs(playerPos.x - centerX) < halfX` for each axis — one fewer
+   *  divide per axis per frame. Defaults to 1.5m → 3m cube which is
+   *  big enough that the user can't accidentally walk past it. */
+  teleportHalfSize: number
+  /** Mounts a TransformControls handle on the trigger so it can be
+   *  dragged in the canvas. Off by default — same pattern as the
+   *  creature gizmos. */
+  teleportGizmoEnabled: boolean
+  /** Which gizmo handle to show. 'scale' lets the user resize the
+   *  AABB; 'translate' moves it. Rotate isn't supported because the
+   *  trigger is an axis-aligned box (rotating it has no effect on
+   *  the AABB test). */
+  teleportGizmoMode: 'translate' | 'scale'
+  /** Show a translucent wireframe cube where the trigger lives so the
+   *  user can see + position it. Defaults true — the whole point of
+   *  the GUI is to edit placement, and an "invisible" trigger you
+   *  can't see is harder to align with the swirl. Once the user is
+   *  happy with placement they flip this off so play-mode is clean. */
+  teleportShowDebug: boolean
+}
+
+/**
+ * Settings that are remembered PER WORLD (keyed by URL slug) rather
+ * than globally. Anything related to a specific world's geometry +
+ * authored alignment + ambience belongs here:
+ *
+ *   • splat offset/rotation/scale — every SPZ has its own authored
+ *     frame; an offset that aligns world A breaks world B.
+ *   • collider offset — same story for the collider GLB.
+ *   • sparkle preset + derived sparkle fields — ambience should
+ *     match the world's vibe ("ember" for a hell cave, "magic"
+ *     for the forest, etc.).
+ *
+ * Keep this list narrow. Movement speed, camera tuning, post-processing,
+ * etc. are GLOBAL: the user expects consistent feel across worlds, and
+ * making them per-world would force the user to re-tune them N times.
+ *
+ * Adding a new key here:
+ *   1. Add the key string to the array below (the `as const` ensures
+ *      it stays typed against `keyof WizardTuning`).
+ *   2. No migration is needed — `worldOverrides[slug]` is
+ *      `Partial<WizardTuning>`, so missing keys just fall back to
+ *      the global default during `applyWorldOverrides`.
+ */
+export const PER_WORLD_KEYS = [
+  // Splat alignment (relative to the world's collider GLB)
+  'splatOffsetX',
+  'splatOffsetY',
+  'splatOffsetZ',
+  'splatRotationDegX',
+  'splatRotationDegY',
+  'splatRotationDegZ',
+  'splatUniformScale',
+  // Collider offset (rare-but-needed nudge when the GLB origin was
+  // exported in the wrong place)
+  'colliderOffsetX',
+  'colliderOffsetY',
+  'colliderOffsetZ',
+  // Collider uniform scale — multiplied into the world's authored
+  // metricScaleFactor. Default 1 = no change; bump up to match a
+  // SPZ that was scaled bigger in the splat tools.
+  'colliderUniformScale',
+  // Wizard spawn Y. Each world has a different floor height (e.g.
+  // hell-cave's cave floor sits at y ≈ -1.41, while fantasy2's
+  // grass plane is around y = 4). Per-world so the wizard lands on
+  // the floor on first teleport into each scene rather than
+  // free-falling for several seconds or spawning inside the mesh.
+  'spawnFeetY',
+  // Lighting — the single biggest reason worlds need to look
+  // different from each other. Red sun for hell-cave, blue sun for
+  // fantasy2; each world also typically has its own ambient
+  // intensity, fill colour, and shadow-follow offsets so the
+  // wizard always looks lit even when the world's environment map
+  // is dark. Every lighting knob is per-world so flipping between
+  // scenes feels like two genuinely separate places.
+  'ambientIntensity',
+  'sunIntensity',
+  'sunPosX',
+  'sunPosY',
+  'sunPosZ',
+  'sunShadowFollowCharacter',
+  'sunColor',
+  'fillIntensity',
+  'fillPosX',
+  'fillPosY',
+  'fillPosZ',
+  'fillColor',
+  // Shadows — paired with lighting because shadow tuning is
+  // tightly coupled to the sun position / colour above. Different
+  // worlds typically want different shadow maps (e.g. hell-cave's
+  // dim red light needs higher shadow intensity than fantasy2's
+  // bright sun).
+  'shadowMapSize',
+  'shadowBias',
+  'shadowNormalBias',
+  'shadowRadius',
+  'shadowCameraNear',
+  'shadowCameraFar',
+  'shadowCameraHalfExtent',
+  'shadowMapType',
+  'shadowIntensity',
+  'shadowBlurSamples',
+  'colliderGlbShadowOpacity',
+  'colliderGlbShadowColor',
+  // Post-processing — each world's vibe usually wants different
+  // bloom / contrast / vignette. Saved per-world so a moody
+  // hell-cave doesn't force the same bloom onto a bright fantasy
+  // forest.
+  'ppEnabled',
+  'ppBloomIntensity',
+  'ppBloomThreshold',
+  'ppBloomSmoothing',
+  'ppBrightness',
+  'ppContrast',
+  'ppVignetteDarkness',
+  'ppVignetteOffset',
+  // Splat brightness boost is part of the "look" too — driven into
+  // the splat shader for HDR bloom (see splatGain.ts). Per-world
+  // so the cave can be subdued while the forest can pop.
+  'splatBrightness',
+  // Sparkle ambience — the user explicitly asked for "ember" in
+  // hell-cave and "magic" in fantasy2, so the entire sparkle config
+  // travels with the world. Including the preset name AND the
+  // derived per-field settings so a preset change in one world
+  // doesn't bleed into another.
+  // EVERY sparkle field that SparkleScene reads — this used to be a
+  // shorter list, but missing fields (sparklePosX/Y/Z, sparkleHeight,
+  // sparkleFollowCharacter, etc.) leaked between worlds because they
+  // weren't reset on world change. If you add a new sparkle knob,
+  // add it here too or it will silently bleed.
+  'sparkleEnabled',
+  'sparklePreset',
+  'sparklePosX',
+  'sparklePosY',
+  'sparklePosZ',
+  'sparkleRadius',
+  'sparkleHeight',
+  'sparkleDensity',
+  'sparkleMaxSplats',
+  'sparkleMinScale',
+  'sparkleMaxScale',
+  'sparkleOpacity',
+  'sparkleColor1',
+  'sparkleColor2',
+  'sparkleFallDirX',
+  'sparkleFallDirY',
+  'sparkleFallDirZ',
+  'sparkleWanderVariance',
+  'sparkleFollowCharacter',
+  'sparkleFollowSmoothing',
+  'sparkleFallVelocity',
+  'sparkleWanderScale',
+] as const satisfies readonly (keyof WizardTuning)[]
+
+export type PerWorldKey = (typeof PER_WORLD_KEYS)[number]
+
+/** Pick only the per-world fields from a full WizardTuning object.
+ *  Used by `saveCurrentSettingsForWorld` to snapshot global state. */
+function extractPerWorldKeys(s: WizardTuning): Partial<WizardTuning> {
+  const out: Partial<WizardTuning> = {}
+  for (const k of PER_WORLD_KEYS) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(out as any)[k] = (s as any)[k]
+  }
+  return out
 }
 
 export type SplatPerfPreset = 'performance' | 'balanced' | 'quality'
@@ -574,6 +831,39 @@ export interface WizardTuningStore extends WizardTuning {
    *  don't accidentally clobber the whole `creatures` record on a
    *  partial update via `setTuning`. */
   setCreatureTransform: (slug: string, partial: Partial<CreatureTransform>) => void
+  // ── Per-world overrides actions ─────────────────────────────────────
+  /** Tell the store which world is currently active. App.tsx calls
+   *  this from a `useEffect` driven by the wouter route. Updates
+   *  `currentWorldSlug` AND immediately calls `applyWorldOverrides`
+   *  for the new slug. */
+  setCurrentWorldSlug: (slug: string) => void
+  /** Copy any saved per-world settings for `slug` into the global
+   *  slider fields. Missing keys fall back to defaults so a brand-
+   *  new world starts at as-authored alignment. Idempotent — safe
+   *  to call when the slug hasn't actually changed. */
+  applyWorldOverrides: (slug: string) => void
+  /** Snapshot the CURRENT global per-world keys (splat alignment,
+   *  collider offset, sparkle settings) into
+   *  `worldOverrides[slug]`. The "Save settings for this world"
+   *  GUI button calls this. */
+  saveCurrentSettingsForWorld: (slug: string) => void
+  /** Mirror a single PP-knob value into the current world's
+   *  `worldDebugOverrides` snapshot. Called from the WizardGui's
+   *  Post-processing folder alongside the existing useDebugStore
+   *  setter so the value survives a world swap. `value` is `unknown`
+   *  because the PP fields are heterogeneous (number, boolean,
+   *  string-enum); `applyDebugOverrides` in debug.ts knows the
+   *  shapes by key. */
+  recordDebugOverride: (key: string, value: unknown) => void
+  /** Write a whole snapshot at once for a specific slug. App.tsx
+   *  uses this on first mount to seed the active world's PP
+   *  overrides with the user's currently-live useDebugStore values,
+   *  so they don't lose their existing PP tuning when the world
+   *  swap system comes online. */
+  seedDebugOverridesForWorld: (slug: string, snapshot: Record<string, unknown>) => void
+  /** Forget the saved overrides for `slug`. Next time it's active,
+   *  per-world keys fall back to defaults. */
+  clearWorldOverrides: (slug: string) => void
   resetToken: number
   bumpResetToken: () => void
 }
@@ -656,7 +946,15 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   showPhysicsDebug: false,
   debugBodies: true,
 
-  splatUniformScale: 1.22,
+  // 1.0 = no scaling vs the world manifest's authored
+  // `metricScaleFactor`. The previous default of 1.22 was set when
+  // this field was dead code (never applied to the splat); now that
+  // SplatRenderer.tsx wires the value into the inner group's scale
+  // prop, the default needs to be a true identity so worlds keep
+  // rendering at their authored size unless the user explicitly
+  // scales them. Per-world (in PER_WORLD_KEYS), so each scene
+  // remembers its own value once the user dials it in.
+  splatUniformScale: 1,
   // Per-splat extra 180° X flip — leave false by default; flip via GUI only when
   // a specific world's splat is upside-down relative to its collider.
   splatFlipYOverride: false,
@@ -730,6 +1028,15 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   colliderOffsetX: 0,
   colliderOffsetY: 0,
   colliderOffsetZ: 0,
+  // Off by default — the gizmo is a debug aid, not a permanent
+  // visual feature. The user flips it on from the GUI when they
+  // want to drag the collider, then off again to stop the in-canvas
+  // controls from intercepting clicks meant for the wizard.
+  colliderGizmoEnabled: false,
+  // Default 1.0 = use the world's authored metricScaleFactor as-is.
+  // Per-world so each world's saved value scales its own collider
+  // when the user teleports in.
+  colliderUniformScale: 1,
 
   splatOffsetX: 0,
   splatOffsetY: 0,
@@ -939,6 +1246,136 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   sparkleFollowSmoothing: 0,
 
   creatures: defaultCreatureTransforms(),
+
+  // Per-world overrides defaults. fantasy2 starts with NO overrides
+  // so it uses the as-authored alignment + global sparkle preset.
+  // hell-cave starts pre-seeded with the "ember" sparkle preset
+  // (matching the cave/lava vibe of the source SPZ) — the user
+  // explicitly asked for this on May 31 '26 21:11. Splat/collider
+  // alignment for hell-cave is intentionally left empty so the user
+  // can adjust it once and click "Save settings for this world".
+  worldOverrides: {
+    'hell-cave': {
+      // NOTE on alignment: we INTENTIONALLY do not pre-seed splat
+      // offsets, collider scale, or spawnFeetY here. The previous
+      // calibration was tuned against a splatUniformScale value
+      // that v62 forced back to 1.0 (because the slider was dead
+      // code before). With the old offsets and the new scale, the
+      // splat ended up far underground and invisible. The user
+      // should re-tune alignment per world via the GUI sliders /
+      // gizmo and click "Save snapshot for this world" when happy.
+      //
+      // Hell-cave lighting — calibrated to the cave/lava palette
+      // the user tuned on 2026-05-31. Red sun (#e6000b) burns
+      // through the cave atmosphere; ambient pushed up so the
+      // wizard isn't lost in the gloom. Fill colour is pure black
+      // because the red sun already does all the colour work and a
+      // tinted fill would muddy it.
+      sunColor: [0xe6 / 255, 0x00 / 255, 0x0b / 255],
+      sunIntensity: 1.62,
+      sunPosX: -23.5,
+      sunPosY: 43.5,
+      sunPosZ: -3.5,
+      sunShadowFollowCharacter: true,
+      ambientIntensity: 0.83,
+      fillIntensity: 0.32,
+      fillColor: [0, 0, 0],
+      fillPosX: -26,
+      fillPosY: 22,
+      fillPosZ: -24,
+      sparkleEnabled: true,
+      sparklePreset: 'ember',
+      // Sparkle field copies follow the same calibration the
+      // sparklePresetToTuning helper would produce — pre-baking them
+      // here means the first teleport into hell-cave looks correct
+      // even before the SparkleScene calls `applySparklePreset`.
+      // These match the 10× viewer-distance scaling used elsewhere
+      // (see SPARKLE_PRESET_SCALE_MULTIPLIER in this file).
+      sparkleDensity: 220,
+      sparkleMinScale: 0.04,
+      sparkleMaxScale: 0.12,
+      sparkleOpacity: 0.95,
+      sparkleColor1: [1.0, 0.55, 0.1],
+      sparkleColor2: [1.0, 0.18, 0.0],
+      sparkleFallVelocity: -0.6,
+      sparkleWanderScale: 0.25,
+    },
+  },
+  currentWorldSlug: 'fantasy2',
+  // Per-world post-processing snapshots. Seeded empty — App.tsx
+  // captures the user's current useDebugStore PP values into
+  // worldDebugOverrides[currentSlug] on first mount via
+  // seedDebugOverridesForWorld, so the per-world system inherits
+  // whatever the user already had. Hell-cave (and any future
+  // worlds) get an empty snapshot → fall back to shipped defaults
+  // in applyDebugOverrides on first visit.
+  worldDebugOverrides: {},
+
+  // Teleport trigger defaults. Position is near the default cosmic
+  // swirl spawn (origin-ish + slightly forward of where the character
+  // spawns at +Y feet). Y is at the wizard's chest height so the AABB
+  // catches the feet+body capsule reliably. The user typically wants
+  // to walk INTO the swirl to teleport, so the trigger should overlap
+  // the swirl visual; the "Snap to Cosmic Swirl" button copies the
+  // current portalPos values into these defaults at runtime.
+  teleportEnabled: true,
+  teleportTargetSlug: 'hell-cave',
+  // Place the trigger AT the cosmic swirl (portalPos default above).
+  // Putting it at the spawn point (0,1,0) caused immediate teleport
+  // the instant the wizard finished falling, because the spawn AABB
+  // and the trigger AABB overlapped. Anchoring to the swirl makes
+  // the gateway thematic — walk into the swirl, you go to hell —
+  // and forces the user to actually traverse some of fantasy2 first.
+  // The user can still drag the gizmo to relocate it.
+  teleportPosX: -26.650,
+  teleportPosY: 1,
+  teleportPosZ: -83.276,
+  teleportHalfSize: 1.5,
+  teleportGizmoEnabled: false,
+  teleportGizmoMode: 'translate',
+  teleportShowDebug: true,
+}
+
+/** Merge `partial` into `state` and ALSO mirror any per-world keys
+ *  into `state.worldOverrides[state.currentWorldSlug]` so the change
+ *  survives a teleport. Pulled out of `setTuning` so the same auto-
+ *  save logic can be reused by `applySparklePreset` (and any other
+ *  future "preset" actions that write per-world fields). Without
+ *  this helper, presets called via `set(...)` directly would write
+ *  to global state but leave `worldOverrides` stale — picking a
+ *  sparkle preset in fantasy2 would write the values globally but
+ *  the choice would silently revert the next time the user
+ *  teleported back into fantasy2, because `setCurrentWorldSlug`
+ *  re-applies the (unchanged) saved overrides on slug change.
+ *
+ *  If `partial` contains NO per-world keys, this returns `partial`
+ *  unchanged — so subscribers of `worldOverrides` don't re-render
+ *  on global-only updates (moveSpeed, etc.). */
+function mergeWithPerWorldSave(
+  partial: Partial<WizardTuning>,
+  state: WizardTuningStore,
+): Partial<WizardTuningStore> {
+  const perWorld: Partial<WizardTuning> = {}
+  let hasPerWorld = false
+  for (const k of PER_WORLD_KEYS) {
+    if (k in partial) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(perWorld as any)[k] = (partial as any)[k]
+      hasPerWorld = true
+    }
+  }
+  if (!hasPerWorld) return partial
+  const slug = state.currentWorldSlug
+  return {
+    ...partial,
+    worldOverrides: {
+      ...state.worldOverrides,
+      [slug]: {
+        ...state.worldOverrides[slug],
+        ...perWorld,
+      },
+    },
+  }
 }
 
 export const useWizardTuning = create<WizardTuningStore>()(
@@ -946,11 +1383,110 @@ export const useWizardTuning = create<WizardTuningStore>()(
     (set) => ({
       ...DEFAULT_WIZARD_TUNING,
       resetToken: 0,
-      setTuning: (partial) => set(partial),
+      setTuning: (partial) => set((state) => mergeWithPerWorldSave(partial, state)),
       resetTuning: () => set({ ...DEFAULT_WIZARD_TUNING }),
-      applySplatPerfPreset: (preset) => set(SPLAT_PERF_PRESETS[preset]),
-      applySparklePreset: (preset) => set(sparklePresetToTuning(preset)),
-      applyPortalLookPreset: (preset) => set(PORTAL_LOOK_PRESETS[preset]),
+      // Preset actions go through `mergeWithPerWorldSave` for the same
+      // reason `setTuning` does — the sparkle preset, in particular,
+      // writes only per-world keys (every sparkle field is in
+      // PER_WORLD_KEYS), so it MUST mirror into `worldOverrides` or
+      // the choice will be lost on the next world swap. Splat-perf
+      // and portal-look presets write only GLOBAL keys, so the
+      // helper short-circuits and returns the patch unchanged — but
+      // routing them through the same wrapper keeps the invariant
+      // local: "every write to wizardTuning is per-world-safe".
+      applySplatPerfPreset: (preset) =>
+        set((state) => mergeWithPerWorldSave(SPLAT_PERF_PRESETS[preset], state)),
+      applySparklePreset: (preset) =>
+        set((state) => mergeWithPerWorldSave(sparklePresetToTuning(preset), state)),
+      applyPortalLookPreset: (preset) =>
+        set((state) => mergeWithPerWorldSave(PORTAL_LOOK_PRESETS[preset], state)),
+      // Per-world overrides actions. These don't write to localStorage
+      // directly — the `worldOverrides` field is included in the
+      // `partialize` list below so it persists with the rest of the
+      // store.
+      setCurrentWorldSlug: (slug) => set((state) => {
+        if (state.currentWorldSlug === slug) return {}
+        // Apply the new slug's saved overrides at the same time we
+        // record the slug — atomicity guarantee, no flash of stale
+        // values between the slug update and the override apply.
+        const overrides = state.worldOverrides[slug] ?? {}
+        const updates: Partial<WizardTuning> = { currentWorldSlug: slug }
+        for (const k of PER_WORLD_KEYS) {
+          if (k in overrides) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ;(updates as any)[k] = (overrides as any)[k]
+          } else {
+            // Fall back to defaults so a world without saved overrides
+            // gets the as-authored alignment. Skipping this branch
+            // would leave the PREVIOUS world's overrides bleeding into
+            // the new one (e.g. teleporting from hell-cave back to
+            // fantasy2 would keep hell-cave's splat scale).
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ;(updates as any)[k] = (DEFAULT_WIZARD_TUNING as any)[k]
+          }
+        }
+        return updates
+      }),
+      applyWorldOverrides: (slug) => set((state) => {
+        const overrides = state.worldOverrides[slug] ?? {}
+        const updates: Partial<WizardTuning> = {}
+        for (const k of PER_WORLD_KEYS) {
+          if (k in overrides) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ;(updates as any)[k] = (overrides as any)[k]
+          } else {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ;(updates as any)[k] = (DEFAULT_WIZARD_TUNING as any)[k]
+          }
+        }
+        return updates
+      }),
+      saveCurrentSettingsForWorld: (slug) => set((state) => ({
+        worldOverrides: {
+          ...state.worldOverrides,
+          [slug]: extractPerWorldKeys(state),
+        },
+      })),
+      recordDebugOverride: (key, value) => set((state) => {
+        const slug = state.currentWorldSlug
+        // Shallow spread keeps reference identity for OTHER slugs'
+        // overrides — subscribers of worldDebugOverrides only
+        // re-render if THEIR slug changed.
+        return {
+          worldDebugOverrides: {
+            ...state.worldDebugOverrides,
+            [slug]: {
+              ...state.worldDebugOverrides[slug],
+              [key]: value,
+            },
+          },
+        }
+      }),
+      seedDebugOverridesForWorld: (slug, snapshot) => set((state) => {
+        // If this slug ALREADY has a snapshot, do nothing — the
+        // user has been tuning PP in this world and their values
+        // beat any seed-time snapshot. The "seed" is meant to
+        // capture the user's pre-per-world PP tuning ONCE, on
+        // first run after the upgrade.
+        if (state.worldDebugOverrides[slug] && Object.keys(state.worldDebugOverrides[slug]).length > 0) {
+          return {}
+        }
+        return {
+          worldDebugOverrides: {
+            ...state.worldDebugOverrides,
+            [slug]: snapshot,
+          },
+        }
+      }),
+      clearWorldOverrides: (slug) => set((state) => {
+        if (!(slug in state.worldOverrides)) return {}
+        // Object-rest to omit the key — cleaner than `delete`
+        // (which mutates) and preserves the reference identity of
+        // the OTHER worlds' override objects.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { [slug]: _removed, ...rest } = state.worldOverrides
+        return { worldOverrides: rest }
+      }),
       setCreatureTransform: (slug, partial) =>
         set((s) => {
           // Always seed from the registry's default first so a slug
@@ -1058,7 +1594,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // max out at 1.0 LDR — right at the bloom threshold — so
       // bloom looked broken once the cosmic-SPZ tint pass was
       // disabled in v51. See `splatGain.ts` for the modifier impl.
-      version: 56,
+      version: 68,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1549,6 +2085,396 @@ export const useWizardTuning = create<WizardTuningStore>()(
         if (fromVersion < 55) {
           migrated.portalShowSphere = false
         }
+        // v57: kill the procedural glitter-spiral particle overlay.
+        // PortalSpiralOverlay was added during the "make the SPZ
+        // look like it's swirling" experiment, then superseded by
+        // the simpler rigid-spin of the SPZ itself once the user
+        // said the particle spiral "shows through the other splats"
+        // and didn't like it. The component still renders when its
+        // toggle is true though, and the user's persisted state
+        // (May 31 '26 19:25 screenshot — vertical line of colored
+        // dots) shows it was left enabled from that experiment.
+        // Force the toggle off so the spiral disappears on next
+        // load; the GUI checkbox still exists so it can be re-
+        // enabled if anyone wants the effect back.
+        if (fromVersion < 57) {
+          migrated.portalSpiralEnabled = false
+        }
+        // v58: seed teleport-trigger fields. The 8 new keys describe
+        // an AABB volume + target slug for the "walk into the cosmic
+        // swirl to enter the hell-cave" portal. Persisted states
+        // from v57 and earlier won't have them at all, so the
+        // TeleportTrigger component would crash on `undefined` reads;
+        // fall back to defaults so first-load placement matches a
+        // clean install. We always copy defaults rather than checking
+        // each field individually because all 8 are tightly coupled
+        // (changing one without the others would produce a half-
+        // configured trigger that's harder to reason about than just
+        // re-seeding from scratch).
+        if (fromVersion < 58) {
+          migrated.teleportEnabled = DEFAULT_WIZARD_TUNING.teleportEnabled
+          migrated.teleportTargetSlug = DEFAULT_WIZARD_TUNING.teleportTargetSlug
+          migrated.teleportPosX = DEFAULT_WIZARD_TUNING.teleportPosX
+          migrated.teleportPosY = DEFAULT_WIZARD_TUNING.teleportPosY
+          migrated.teleportPosZ = DEFAULT_WIZARD_TUNING.teleportPosZ
+          migrated.teleportHalfSize = DEFAULT_WIZARD_TUNING.teleportHalfSize
+          migrated.teleportGizmoEnabled = DEFAULT_WIZARD_TUNING.teleportGizmoEnabled
+          migrated.teleportGizmoMode = DEFAULT_WIZARD_TUNING.teleportGizmoMode
+          migrated.teleportShowDebug = DEFAULT_WIZARD_TUNING.teleportShowDebug
+        }
+        // v59: per-world overrides. Splat alignment / collider offset /
+        // sparkle settings used to be GLOBAL — editing them in
+        // hell-cave silently desynced fantasy2's alignment (user
+        // reported "I moved and sized the spz but it didnt affect
+        // the collider" on May 31 '26 21:11). Add the
+        // `worldOverrides` + `currentWorldSlug` plumbing; pre-seed
+        // hell-cave with the ember sparkle preset since the user
+        // also asked for that to switch automatically on teleport.
+        //
+        // CRITICALLY: we do NOT snapshot the user's current global
+        // values into any specific world here. That would lock in
+        // whatever broken state they're sitting in. Instead the
+        // current globals stay as-is (untouched until the user
+        // teleports or clicks "Save settings for this world"); on
+        // the first teleport, App.tsx calls applyWorldOverrides for
+        // the new slug, which loads either the saved overrides
+        // (hell-cave gets ember) or DEFAULT_WIZARD_TUNING values
+        // (fantasy2 gets clean alignment). So a single teleport
+        // round-trip is enough to fix both worlds.
+        if (fromVersion < 59) {
+          // Only set worldOverrides if the field is missing — if the
+          // user already saved overrides via a future build, we
+          // wouldn't want to wipe them. (Belt-and-suspenders; v59
+          // is the version that INTRODUCES the field so this branch
+          // can't realistically hit.)
+          if (!migrated.worldOverrides || typeof migrated.worldOverrides !== 'object') {
+            migrated.worldOverrides = DEFAULT_WIZARD_TUNING.worldOverrides
+          }
+          if (typeof migrated.currentWorldSlug !== 'string') {
+            migrated.currentWorldSlug = DEFAULT_WIZARD_TUNING.currentWorldSlug
+          }
+        }
+        if (fromVersion < 60) {
+          // colliderUniformScale was added alongside the per-world
+          // overrides because the user needed to scale the hell-cave
+          // collider to match a manually-scaled SPZ. Seed it to 1.0
+          // (no change vs the world's authored metricScaleFactor) for
+          // any persisted state that predates the field. This is a
+          // separate version bump from v59 because v59 was already
+          // shipped without it — users on v59 still need this branch.
+          if (typeof migrated.colliderUniformScale !== 'number') {
+            migrated.colliderUniformScale = DEFAULT_WIZARD_TUNING.colliderUniformScale
+          }
+          // colliderGizmoEnabled is new in v60 too. Force OFF on
+          // first hydration so the user isn't surprised by a gizmo
+          // appearing in the scene after the migration runs — they
+          // can enable it from the GUI when they actually want it.
+          if (typeof migrated.colliderGizmoEnabled !== 'boolean') {
+            migrated.colliderGizmoEnabled = DEFAULT_WIZARD_TUNING.colliderGizmoEnabled
+          }
+        }
+        if (fromVersion < 61) {
+          // Bake the user's hard-won hell-cave calibration into the
+          // persisted overrides. The user spent time dragging the
+          // splat into the manually-scaled collider on 2026-05-31
+          // and asked us to "save everything in this position".
+          // Merge order: CALIBRATED defaults first, then existing
+          // user overrides. If the user has already saved a value
+          // for a key (e.g. they nudged the splat after this build
+          // shipped), their value wins. Missing keys (most notably
+          // spawnFeetY, which we added to PER_WORLD_KEYS in v61)
+          // fall back to the calibrated value so the wizard doesn't
+          // spawn 5 m above the cave floor on first teleport in.
+          // `migrated` is typed as Record<string, unknown> here, so we
+          // narrow to the shape the rest of the migration relies on.
+          // Cast over a guard rather than restructuring the whole
+          // migrate() to use Partial<WizardTuning> — that refactor is
+          // touchy and out of scope for a single per-world override.
+          const overrides = migrated.worldOverrides as
+            | Record<string, Partial<WizardTuning>>
+            | undefined
+          if (overrides && typeof overrides === 'object') {
+            const existing = overrides['hell-cave'] ?? {}
+            const calibrated = DEFAULT_WIZARD_TUNING.worldOverrides['hell-cave'] ?? {}
+            migrated.worldOverrides = {
+              ...overrides,
+              'hell-cave': { ...calibrated, ...existing },
+            }
+            // Special-case: if the user IS currently in hell-cave on
+            // hydration, their global spawnFeetY needs to match the
+            // override too — otherwise the WizardController spawns
+            // at the OLD value before the next route change fires
+            // applyWorldOverrides. Cheaper to fix it once here than
+            // ship a "respawn after migration" effect somewhere.
+            if (migrated.currentWorldSlug === 'hell-cave' && typeof existing.spawnFeetY !== 'number') {
+              migrated.spawnFeetY = calibrated.spawnFeetY ?? migrated.spawnFeetY
+            }
+          }
+        }
+        if (fromVersion < 62) {
+          // splatUniformScale was previously dead code (the GUI slider
+          // existed and was persisted, but SplatRenderer.tsx never
+          // applied it to the rendered splat). v62 wires it into the
+          // inner group's scale prop. Any value left over in
+          // persisted state was meaningless — applying it now would
+          // suddenly scale every world that has a stored value
+          // (notably fantasy2, where the old global default of 1.22
+          // would render the splat 22% bigger overnight). Force the
+          // global field to 1.0 and wipe per-world overrides for the
+          // same key so every scene starts at "as-authored size" and
+          // the user re-dials whatever they actually want via the
+          // newly-functional slider.
+          migrated.splatUniformScale = 1
+          const overridesV62 = migrated.worldOverrides as
+            | Record<string, Partial<WizardTuning>>
+            | undefined
+          if (overridesV62 && typeof overridesV62 === 'object') {
+            const cleaned: Record<string, Partial<WizardTuning>> = {}
+            for (const slug of Object.keys(overridesV62)) {
+              // Destructure to drop splatUniformScale without mutating
+              // the source object. ESLint complains about the unused
+              // binding so we mark it intentionally-unused.
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { splatUniformScale: _drop, ...rest } = overridesV62[slug]
+              cleaned[slug] = rest
+            }
+            migrated.worldOverrides = cleaned
+          }
+        }
+        if (fromVersion < 63) {
+          // Lighting / shadows / post-processing / splatBrightness
+          // are now per-world (PER_WORLD_KEYS). Before this version
+          // these knobs were GLOBAL — so when the user changed the
+          // sun to red while standing in hell-cave, that red colour
+          // bled into fantasy2 too. Now each world owns its own
+          // copy. To preserve the user's current tuning we
+          // SNAPSHOT the current globals into the current world's
+          // overrides, then RESET the globals to defaults. The next
+          // time the user teleports between worlds, applyWorldOverrides
+          // will pull each world's settings independently.
+          //
+          // Migration order matters: snapshot first, THEN reset, so
+          // the snapshot captures the user's tuned values (not the
+          // defaults we're about to write).
+          //
+          // List of keys hard-coded here rather than re-using
+          // PER_WORLD_KEYS because we want to be explicit about
+          // which categories migrate — splat/collider alignment +
+          // sparkle were always per-world even before v63 and
+          // shouldn't be touched here.
+          const v63LookKeys = [
+            'ambientIntensity', 'sunIntensity', 'sunPosX', 'sunPosY', 'sunPosZ',
+            'sunShadowFollowCharacter', 'sunColor', 'fillIntensity',
+            'fillPosX', 'fillPosY', 'fillPosZ', 'fillColor',
+            'shadowMapSize', 'shadowBias', 'shadowNormalBias', 'shadowRadius',
+            'shadowCameraNear', 'shadowCameraFar', 'shadowCameraHalfExtent',
+            'shadowMapType', 'shadowIntensity', 'shadowBlurSamples',
+            'colliderGlbShadowOpacity', 'colliderGlbShadowColor',
+            'ppEnabled', 'ppBloomIntensity', 'ppBloomThreshold', 'ppBloomSmoothing',
+            'ppBrightness', 'ppContrast', 'ppVignetteDarkness', 'ppVignetteOffset',
+            'splatBrightness',
+          ] as const
+
+          const currentSlug =
+            typeof migrated.currentWorldSlug === 'string' && migrated.currentWorldSlug
+              ? migrated.currentWorldSlug
+              : 'fantasy2' // best-effort default for stores that never set a slug
+
+          // Snapshot: build the per-slug override from whatever
+          // values the user currently has set globally. Skip any
+          // key that's missing/undefined to avoid storing junk.
+          const snapshot: Record<string, unknown> = {}
+          for (const k of v63LookKeys) {
+            if (migrated[k] !== undefined) snapshot[k] = migrated[k]
+          }
+
+          const overridesV63 = (migrated.worldOverrides as
+            | Record<string, Partial<WizardTuning>>
+            | undefined) ?? {}
+          // Merge: snapshot first (lower precedence), then any
+          // existing override (higher precedence). The current world
+          // gets the snapshot baked in, but if the user already had
+          // a partial override for the same key it wins.
+          migrated.worldOverrides = {
+            ...overridesV63,
+            [currentSlug]: {
+              ...snapshot,
+              ...(overridesV63[currentSlug] ?? {}),
+            },
+          }
+
+          // Now reset the globals to as-shipped defaults. When the
+          // user next teleports / refreshes, applyWorldOverrides
+          // re-applies the right world's values.
+          for (const k of v63LookKeys) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            migrated[k] = (DEFAULT_WIZARD_TUNING as any)[k]
+          }
+          // ALSO immediately apply the current world's overrides on
+          // top of the freshly-reset globals so the page doesn't
+          // flash defaults for one frame on hydration.
+          const finalOverrides = (migrated.worldOverrides as
+            Record<string, Partial<WizardTuning>>)[currentSlug] ?? {}
+          for (const k of v63LookKeys) {
+            if (k in finalOverrides) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              migrated[k] = (finalOverrides as any)[k]
+            }
+          }
+        }
+        if (fromVersion < 64) {
+          // The user reported fantasy2 alignment was "not aligned
+          // properly anymore" and asked to restore the values from
+          // their last git commit (b1a59d4), where fantasy2's
+          // alignment was just the defaults: every splat/collider
+          // offset = 0, every scale = 1 (or the global default at the
+          // time), spawnFeetY = 4. Stale user-set overrides from the
+          // pre-per-world era had crept into worldOverrides['fantasy2']
+          // via the auto-save in setTuning.
+          //
+          // Surgically strip ONLY alignment keys from fantasy2's
+          // overrides — we leave sparkle / lighting / post-processing
+          // alone because the user didn't ask to revert those (and
+          // doing so would wipe any deliberate fantasy-look tuning
+          // they did intentionally). If they want a full fantasy2
+          // reset later, the "Reset this world to defaults" button
+          // already does that.
+          const alignmentKeys = [
+            'splatOffsetX', 'splatOffsetY', 'splatOffsetZ',
+            'splatRotationDegX', 'splatRotationDegY', 'splatRotationDegZ',
+            'splatUniformScale',
+            'colliderOffsetX', 'colliderOffsetY', 'colliderOffsetZ',
+            'colliderUniformScale',
+            'spawnFeetY',
+          ] as const
+          const overridesV64 = migrated.worldOverrides as
+            | Record<string, Partial<WizardTuning>>
+            | undefined
+          if (overridesV64 && overridesV64['fantasy2']) {
+            const fantasy = { ...overridesV64['fantasy2'] }
+            for (const k of alignmentKeys) {
+              delete (fantasy as Record<string, unknown>)[k]
+            }
+            migrated.worldOverrides = {
+              ...overridesV64,
+              fantasy2: fantasy,
+            }
+          }
+          // If the user is currently IN fantasy2 on hydration, the
+          // global alignment fields could still hold stale tweaks
+          // from before. Reset those to defaults so the splat snaps
+          // to the as-authored alignment without waiting for a
+          // teleport.
+          if (migrated.currentWorldSlug === 'fantasy2') {
+            for (const k of alignmentKeys) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              migrated[k] = (DEFAULT_WIZARD_TUNING as any)[k]
+            }
+          }
+        }
+        if (fromVersion < 66) {
+          // The user reported ember particles bleeding into fantasy2
+          // (they should be hell-cave-only). Root cause: several
+          // sparkle fields (`sparklePosX/Y/Z`, `sparkleHeight`,
+          // `sparkleFollowCharacter`, etc.) are read by SparkleScene
+          // but were never added to PER_WORLD_KEYS. When the user
+          // applies the ember preset in hell-cave, those globals get
+          // written and persist; teleporting to fantasy2 doesn't
+          // clear them because applyWorldOverrides only touches
+          // keys listed in PER_WORLD_KEYS.
+          //
+          // Cumulative migrations over the last hour have made the
+          // user's persisted state hard to reason about. The fastest
+          // path to a known-good baseline is a NUCLEAR RESET of
+          // worldOverrides: wipe the user's accumulated per-world
+          // overrides and reseed from the code-level defaults
+          // (DEFAULT_WIZARD_TUNING.worldOverrides). The pre-seeded
+          // hell-cave look survives (red sun + ember sparkle),
+          // fantasy2 gets no overrides (= as-shipped defaults), and
+          // every per-world GLOBAL field is reset to the default
+          // value too so whichever world is active on hydration
+          // matches its overrides cleanly.
+          migrated.worldOverrides = {
+            ...DEFAULT_WIZARD_TUNING.worldOverrides,
+          }
+          for (const k of PER_WORLD_KEYS) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            migrated[k] = (DEFAULT_WIZARD_TUNING as any)[k]
+          }
+          // If the user is currently in a world that has pre-seeded
+          // overrides (hell-cave), apply them to globals so the page
+          // doesn't flash defaults for a frame before App's effect
+          // fires setCurrentWorldSlug.
+          const currentSlugV66 =
+            typeof migrated.currentWorldSlug === 'string' && migrated.currentWorldSlug
+              ? migrated.currentWorldSlug
+              : ''
+          if (currentSlugV66) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const seeded = (DEFAULT_WIZARD_TUNING.worldOverrides as any)[currentSlugV66]
+            if (seeded) {
+              for (const k of PER_WORLD_KEYS) {
+                if (k in seeded) {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  migrated[k] = seeded[k]
+                }
+              }
+            }
+          }
+          if (typeof console !== 'undefined') {
+            console.info(
+              '[wizardTuning v66] Nuclear reset: wiped user worldOverrides, ' +
+              'reseeded from DEFAULT_WIZARD_TUNING. Hell-cave keeps its ' +
+              'pre-seeded red sun + ember sparkle; fantasy2 is at vanilla ' +
+              'defaults; alignment is 0,0,0 in both worlds.'
+            )
+          }
+        }
+        if (fromVersion < 67) {
+          // The user reported the teleport square was auto-firing at the
+          // fantasy2 spawn point. Root cause: the v58 default placed it
+          // at (0,1,0) with halfSize 1.5, which is exactly where the
+          // wizard's feet land after falling from spawnFeetY=4 — the
+          // capsule passes straight through the AABB on the way down
+          // and edge-triggers the teleport before the player has any
+          // chance to look around.
+          //
+          // Move it to the cosmic swirl (the thematic gateway). Only
+          // override if it still matches the OLD default; preserve any
+          // intentional user placement (gizmo drag, world-snapshot, etc.).
+          const isOldDefault =
+            migrated.teleportPosX === 0 &&
+            migrated.teleportPosY === 1 &&
+            migrated.teleportPosZ === 0
+          if (isOldDefault) {
+            migrated.teleportPosX = DEFAULT_WIZARD_TUNING.teleportPosX
+            migrated.teleportPosY = DEFAULT_WIZARD_TUNING.teleportPosY
+            migrated.teleportPosZ = DEFAULT_WIZARD_TUNING.teleportPosZ
+            if (typeof console !== 'undefined') {
+              console.info(
+                '[wizardTuning v67] Moved teleport square from spawn (0,1,0) ' +
+                'to the cosmic swirl ' +
+                `(${DEFAULT_WIZARD_TUNING.teleportPosX}, ` +
+                `${DEFAULT_WIZARD_TUNING.teleportPosY}, ` +
+                `${DEFAULT_WIZARD_TUNING.teleportPosZ}).`
+              )
+            }
+          }
+        }
+        if (fromVersion < 68) {
+          // Introduce the per-world post-processing snapshot map.
+          // The actual seeding (capturing the user's current
+          // useDebugStore PP values into the active world's
+          // snapshot) happens in App.tsx on first mount — the
+          // migration runs before useDebugStore is guaranteed to
+          // be hydrated, so we can't read from it safely here.
+          // Just make sure the field exists with an empty default
+          // so the seedDebugOverridesForWorld action has something
+          // to spread into.
+          if (!migrated.worldDebugOverrides || typeof migrated.worldDebugOverrides !== 'object') {
+            migrated.worldDebugOverrides = {}
+          }
+        }
         // v49: introduce the `creatures` record. Older stores have no
         // `creatures` field at all → CreaturesScene reads `undefined`,
         // every per-slug selector falls back to NaN, and the proxy
@@ -1602,6 +2528,10 @@ export const useWizardTuning = create<WizardTuningStore>()(
           applySparklePreset: _sparkle,
           applyPortalLookPreset: _portal,
           setCreatureTransform: _creature,
+          setCurrentWorldSlug: _setSlug,
+          applyWorldOverrides: _applyOv,
+          saveCurrentSettingsForWorld: _saveOv,
+          clearWorldOverrides: _clearOv,
           bumpResetToken: _bump,
           ...rest
         } = s
