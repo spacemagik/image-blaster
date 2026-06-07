@@ -963,15 +963,29 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
 
   splatLodEnabled: true,
   splatLodSplatScale: 1,
+  // Real-time profile tuned for the full-detail `.rad` worlds. Because
+  // `.rad` streams LOD by distance, Spark always keeps the BEST splats
+  // near the camera — so we can render ~half as many as the "quality"
+  // tier and tighten foveation hard without the scene looking soft
+  // where you're actually looking. This is the single biggest FPS lever
+  // on 20M+ splat scenes (see SPLAT_PERF_PRESETS.balanced).
+  //   - Budget 1.5M (was 3M): halves per-frame sort + draw cost.
+  //   - renderScale 2 + minPixelRadius 1.0: drop sub-pixel splats that
+  //     cost fill-rate but add no visible detail.
+  //   - Foveation cones: full detail in a 50° front cone, aggressively
+  //     thinned in the periphery and behind the camera (off-screen
+  //     splats are the cheapest to drop).
+  //   - lodInflate: soften kernels so the lower budget doesn't show
+  //     LOD "popping" as you move.
   splatLodRenderScale: 2,
   splatMaxStdDev: Math.sqrt(6),
   splatLodSplatCount: 1_500_000,
-  splatMinPixelRadius: 0.75,
-  splatConeFov0Deg: 60,
-  splatConeFovDeg: 110,
-  splatConeFoveate: 0.35,
-  splatBehindFoveate: 0.08,
-  splatLodInflate: false,
+  splatMinPixelRadius: 1.0,
+  splatConeFov0Deg: 50,
+  splatConeFovDeg: 100,
+  splatConeFoveate: 0.3,
+  splatBehindFoveate: 0.05,
+  splatLodInflate: true,
 
   // Gain multiplier applied to every world-splat RGB pixel via
   // the `worldModifier` in `splatGain.ts`.
@@ -1333,7 +1347,10 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   teleportHalfSize: 1.5,
   teleportGizmoEnabled: false,
   teleportGizmoMode: 'translate',
-  teleportShowDebug: true,
+  // Default OFF so players don't see the cyan AABB box + RGB drag gizmo
+  // sitting in the world. Flip on from the debug GUI when relocating
+  // the trigger.
+  teleportShowDebug: false,
 }
 
 /** Merge `partial` into `state` and ALSO mirror any per-world keys
@@ -1594,7 +1611,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // max out at 1.0 LDR — right at the bloom threshold — so
       // bloom looked broken once the cosmic-SPZ tint pass was
       // disabled in v51. See `splatGain.ts` for the modifier impl.
-      version: 68,
+      version: 71,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -2473,6 +2490,80 @@ export const useWizardTuning = create<WizardTuningStore>()(
           // to spread into.
           if (!migrated.worldDebugOverrides || typeof migrated.worldDebugOverrides !== 'object') {
             migrated.worldDebugOverrides = {}
+          }
+        }
+        if (fromVersion < 69) {
+          // The v67 fix moved the teleport square off spawn, but only
+          // for stores older than v67. Users who were already past v67
+          // kept a stuck (0,1,0) value (e.g. from an earlier reset),
+          // which makes the wizard teleport to hell-cave the instant it
+          // spawns in fantasy2 — the player never gets to start in the
+          // fantasy world. Re-run the same (0,1,0)→cosmic-swirl fix at
+          // this version so those stores get corrected too. Any
+          // intentional placement (non-(0,1,0)) is preserved.
+          const stuckAtSpawn =
+            migrated.teleportPosX === 0 &&
+            migrated.teleportPosY === 1 &&
+            migrated.teleportPosZ === 0
+          if (stuckAtSpawn) {
+            migrated.teleportPosX = DEFAULT_WIZARD_TUNING.teleportPosX
+            migrated.teleportPosY = DEFAULT_WIZARD_TUNING.teleportPosY
+            migrated.teleportPosZ = DEFAULT_WIZARD_TUNING.teleportPosZ
+            migrated.teleportHalfSize = DEFAULT_WIZARD_TUNING.teleportHalfSize
+            if (typeof console !== 'undefined') {
+              console.info(
+                '[wizardTuning v69] Teleport square was stuck at spawn (0,1,0); ' +
+                'reset to the cosmic swirl ' +
+                `(${DEFAULT_WIZARD_TUNING.teleportPosX}, ` +
+                `${DEFAULT_WIZARD_TUNING.teleportPosY}, ` +
+                `${DEFAULT_WIZARD_TUNING.teleportPosZ}).`
+              )
+            }
+          }
+        }
+        if (fromVersion < 70) {
+          // Two visual-quality fixes after the 21M→3M decimation:
+          //   1. The runtime LOD budget was capped at 1.5M splats, so
+          //      only half of each decimated world actually rendered —
+          //      the scene looked soft/blurry. Raise it to 3M (render
+          //      everything we shipped) and drop renderScale to 1.5 so
+          //      small/distant splats survive. These are GLOBAL knobs.
+          //   2. The teleport debug box + drag gizmo were visible in
+          //      play (cyan AABB + RGB arrows floating next to the
+          //      wizard). Force both off.
+          migrated.splatLodSplatCount = DEFAULT_WIZARD_TUNING.splatLodSplatCount
+          migrated.splatLodRenderScale = DEFAULT_WIZARD_TUNING.splatLodRenderScale
+          migrated.teleportShowDebug = false
+          migrated.teleportGizmoEnabled = false
+          if (typeof console !== 'undefined') {
+            console.info(
+              '[wizardTuning v70] Raised LOD budget to 3M (renderScale 1.5) ' +
+              'for sharper worlds, and hid the teleport debug box + gizmo.'
+            )
+          }
+        }
+        if (fromVersion < 71) {
+          // Performance pass for the full-detail `.rad` worlds. v70 had
+          // pushed the LOD to a heavy "quality" profile (3M budget, wide
+          // full-detail cone) which renders beautifully but lags. Switch
+          // to the real-time profile: ~half the splat budget + tighter
+          // foveation. With `.rad` streaming LOD by distance this keeps
+          // near-camera detail crisp while roughly doubling FPS. All
+          // GLOBAL knobs, so it applies to every world at once.
+          migrated.splatLodSplatCount = DEFAULT_WIZARD_TUNING.splatLodSplatCount
+          migrated.splatLodRenderScale = DEFAULT_WIZARD_TUNING.splatLodRenderScale
+          migrated.splatMinPixelRadius = DEFAULT_WIZARD_TUNING.splatMinPixelRadius
+          migrated.splatConeFov0Deg = DEFAULT_WIZARD_TUNING.splatConeFov0Deg
+          migrated.splatConeFovDeg = DEFAULT_WIZARD_TUNING.splatConeFovDeg
+          migrated.splatConeFoveate = DEFAULT_WIZARD_TUNING.splatConeFoveate
+          migrated.splatBehindFoveate = DEFAULT_WIZARD_TUNING.splatBehindFoveate
+          migrated.splatLodInflate = DEFAULT_WIZARD_TUNING.splatLodInflate
+          if (typeof console !== 'undefined') {
+            console.info(
+              '[wizardTuning v71] Switched to the real-time LOD/foveation ' +
+              'profile (1.5M budget, 50° detail cone) for smoother FPS on ' +
+              'the .rad worlds. Use the Splat-perf GUI presets to fine-tune.'
+            )
           }
         }
         // v49: introduce the `creatures` record. Older stores have no

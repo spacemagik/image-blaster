@@ -105,6 +105,16 @@ export function TeleportTrigger() {
   // the player. Cleared on mouseup.
   const draggingRef = useRef(false)
 
+  // Armed latch — the trigger may only fire once the player has been
+  // observed OUTSIDE the box at least once. This makes the fire a true
+  // edge-trigger (outside → inside) rather than a level-trigger. Without
+  // it, if the trigger box overlaps the spawn point (or the wizard's
+  // fall path from spawnFeetY passes through the AABB), the player gets
+  // teleported away the instant the world loads and can never actually
+  // start in this world. Cleared by remount, re-armed on first outside
+  // frame.
+  const armedRef = useRef(false)
+
   // Sync proxy transform from store when not being dragged. (When
   // dragging, the gizmo owns the transform and we write back to the
   // store via `onObjectChange`.) Reads position + halfSize → scale.
@@ -135,7 +145,16 @@ export function TeleportTrigger() {
     const dz = Math.abs(playerPos.z - t.teleportPosZ)
     const h = t.teleportHalfSize
     const inside = dx < h && dy < h && dz < h
-    if (!inside) return
+    if (!inside) {
+      // First (and every) frame the player is outside the box arms the
+      // trigger. Until this happens at least once, an inside reading is
+      // treated as "spawned inside" and ignored.
+      armedRef.current = true
+      return
+    }
+    // Inside, but not yet armed → player spawned inside (or fell through
+    // the box). Don't fire; wait until they leave and come back.
+    if (!armedRef.current) return
 
     // If we're somehow already on the target route, don't re-navigate
     // (some routers treat a navigate-to-same as a no-op + remount;
@@ -172,7 +191,10 @@ export function TeleportTrigger() {
   // Reset the fired latch if teleport is toggled off then on, so the
   // user can re-test placement without remounting the whole world.
   useEffect(() => {
-    if (!enabled) firedRef.current = false
+    if (!enabled) {
+      firedRef.current = false
+      armedRef.current = false
+    }
   }, [enabled])
 
   // Don't render anything in the target world — the trigger has no
