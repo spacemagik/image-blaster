@@ -1611,7 +1611,7 @@ export const useWizardTuning = create<WizardTuningStore>()(
       // max out at 1.0 LDR — right at the bloom threshold — so
       // bloom looked broken once the cosmic-SPZ tint pass was
       // disabled in v51. See `splatGain.ts` for the modifier impl.
-      version: 71,
+      version: 80,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       migrate: (persistedState: any, fromVersion: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -2605,6 +2605,14 @@ export const useWizardTuning = create<WizardTuningStore>()(
             // from a known-visible state. As with v50, this is a
             // one-shot — future GUI hides won't be clobbered.
             ...(fromVersion < 56 ? { enabled: true } : {}),
+            // v80: one-shot scrub. A June '26 debugging session left
+            // creatures with garbage transforms (oversized scale, a
+            // near-origin position that clipped into the wizard, and
+            // gizmos toggled on). This re-applies the default transform
+            // for every creature exactly once so they snap back to the
+            // baseline spread-out arc with gizmos off. Splat / portal /
+            // sparkle / collider settings are deliberately untouched.
+            ...(fromVersion < 80 ? { ...config.defaultTransform } : {}),
           }
         }
         migrated.creatures = seededCreatures

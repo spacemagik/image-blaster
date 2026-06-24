@@ -424,7 +424,16 @@ function worldsPlugin(): Plugin {
       .filter((file) => file.slug.startsWith('world'))
       .filter((file) => index === undefined || file.index === index)
     const radFilename = (index === undefined ? latestIndexed(radMatches) : radMatches[0])?.name
-    const radUrl = radFilename ? worldAssetUrl(slug, radFilename) : ''
+    const localRadUrl = radFilename ? worldAssetUrl(slug, radFilename) : ''
+    // A hosted (http/https) rad_url in the world manifest wins over a
+    // locally-discovered .rad file — lets a world stream its splat from a
+    // CDN while the local copy stays on disk as an offline backup.
+    const manifestRadUrl = world.assets?.splats?.rad_url
+    const remoteRadUrl =
+      typeof manifestRadUrl === 'string' && /^https?:\/\//.test(manifestRadUrl)
+        ? manifestRadUrl
+        : ''
+    const radUrl = remoteRadUrl || localRadUrl
 
     const collider = worldAssetFilename(files, index, 'world', MODEL_EXTENSIONS)
     const pano = worldAssetFilename(files, index, 'world-pano', IMAGE_EXTENSIONS)

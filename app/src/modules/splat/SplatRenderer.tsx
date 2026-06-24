@@ -1,6 +1,6 @@
 import { useMemo, useRef, useEffect, useState, useCallback } from 'react'
 import { extend, useThree, useFrame } from '@react-three/fiber'
-import { SplatMesh, SparkRenderer } from '@sparkjsdev/spark'
+import { SplatMesh, SparkRenderer, PagedSplats, SplatFileType } from '@sparkjsdev/spark'
 import { makeSplatGain, type SplatGainHandle } from './splatGain'
 import { TransformControls } from '@react-three/drei'
 import * as THREE from 'three'
@@ -247,6 +247,14 @@ export function SplatRenderer({
       splatGainRef.current = makeSplatGain(useWizardTuning.getState().splatBrightness ?? 1.5)
     }
 
+    // `.rad` sources (local file or hosted CDN URL — the hosted one has no
+    // extension, so treat any http(s) splat URL as rad) use Spark's paged
+    // streaming: `paged: true` wraps the URL in `PagedSplats` and the pager
+    // fetches LOD chunks on demand via byte-range requests. The full file is
+    // NEVER downloaded or decoded up front — first paint needs only the
+    // header + coarse root pages.
+    const isRadSource = /\.rad([?#]|$)/i.test(url) || /^https?:\/\//i.test(url)
+
     useEffect(() => {
       const mesh = splatRef.current
       if (!mesh) return
@@ -254,6 +262,7 @@ export function SplatRenderer({
       const spark = sparkRef.current
       console.log('[Spark] SplatRenderer mounted', {
         url,
+        paged: isRadSource,
         sparkRenderer: !!spark,
         enableLodCtor: spark?.enableLod,
         maxPagedSplats: initialMaxPagedSplats.current,
@@ -265,7 +274,7 @@ export function SplatRenderer({
           const tInit = performance.now()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const packed: any = (mesh as any).packedSplats
-          console.log('[Spark] SplatMesh initialized (lod: true)', {
+          console.log(`[Spark] SplatMesh initialized (${isRadSource ? 'paged: true' : 'lod: true'})`, {
             ms: Math.round(tInit - t0),
             numSplats: packed?.numSplats,
             lodSplatsLen: packed?.lodSplats?.numSplats ?? packed?.lodSplats?.length,
@@ -318,20 +327,38 @@ export function SplatRenderer({
       maxPagedSplats: initialMaxPagedSplats.current,
     }), [renderer])
     const splatArgs = useMemo(
-      () => ({
-        url,
-        // Spark 2.1 canonical LoD-on-load: `lod: true` tells the loader to
-        // decode the SPZ into a `GsplatArray`, run Quick LoD in a background
-        // WebWorker, and finish init with `packedSplats.lodSplats` already
-        // populated. The SparkRenderer pager (which has `enableLod: true`
-        // above) starts paging from frame 0. This is the streaming-pipelined
-        // path and is dramatically faster on huge SPZs than calling
-        // `createLodSplats()` post-init (which forces Spark to re-parse the
-        // whole mesh a second time after load).
-        lod: true as const,
-      }),
-      [url],
+      () =>
+        isRadSource
+          ? {
+              url,
+              // Explicit fileType because the hosted CDN URL has no `.rad`
+              // extension — with bare `paged: true` Spark tries to infer the
+              // type from the URL path and throws "Unable to determine file
+              // type". Building the PagedSplats ourselves pins it to RAD.
+              paged: new PagedSplats({ rootUrl: url, fileType: SplatFileType.RAD }),
+            }
+          : {
+              url,
+              // Spark 2.1 canonical LoD-on-load for whole-file sources
+              // (.spz): decode into a `GsplatArray`, run Quick LoD in a
+              // background WebWorker, and finish init with
+              // `packedSplats.lodSplats` already populated. The
+              // SparkRenderer pager (`enableLod: true` above) starts paging
+              // from frame 0. Dramatically faster on huge SPZs than calling
+              // `createLodSplats()` post-init (which re-parses the whole
+              // mesh a second time after load).
+              lod: true as const,
+            },
+      [url, isRadSource],
     )
+
+    // Spark doesn't dispose externally-provided paged sources, so free the
+    // PagedSplats (indices texture, pager registration) ourselves when the
+    // world unmounts or the url changes (teleport).
+    useEffect(() => {
+      const paged = (splatArgs as { paged?: PagedSplats }).paged
+      return () => paged?.dispose()
+    }, [splatArgs])
 
     return (
       <>

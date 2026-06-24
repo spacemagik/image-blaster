@@ -13,8 +13,14 @@ export async function fetchWorlds(): Promise<WorldEntry[]> {
   return response.json() as Promise<WorldEntry[]>
 }
 
-function localWorldAssetUrl(url: string | undefined): string {
-  return url?.startsWith('/worlds/') ? url : ''
+function resolvableAssetUrl(url: string | undefined): string {
+  if (!url) return ''
+  // Local dev-server asset (served out of `worlds/` by the vite plugin)
+  if (url.startsWith('/worlds/')) return url
+  // Hosted asset (e.g. a CDN-served .rad) — Spark streams it directly via
+  // byte-range fetches, so the host must send CORS + Accept-Ranges headers.
+  if (/^https?:\/\//.test(url)) return url
+  return ''
 }
 
 export function getSplatUrl(world: World): string {
@@ -23,7 +29,7 @@ export function getSplatUrl(world: World): string {
   // it streams precomputed LOD chunks (faster first paint, far less main-
   // thread work than decoding the full `.spz` + building LOD live). Falls
   // back to the full-res `.spz` for worlds that don't have a `.rad` yet.
-  const rad = localWorldAssetUrl(splats.rad_url)
+  const rad = resolvableAssetUrl(splats.rad_url)
   if (rad) return rad
-  return localWorldAssetUrl(splats.spz_urls.full_res)
+  return resolvableAssetUrl(splats.spz_urls.full_res)
 }
