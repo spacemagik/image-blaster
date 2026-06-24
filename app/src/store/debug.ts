@@ -262,14 +262,14 @@ export const PER_WORLD_DEBUG_SETTERS: Record<PerWorldDebugKey, keyof DebugStore>
  *  would be a good follow-up). */
 export const DEFAULT_PER_WORLD_DEBUG_VALUES: Record<PerWorldDebugKey, unknown> = {
   bloomEnabled: true,
-  bloomIntensity: 0.8,
-  bloomThreshold: 0.85,
-  bloomSmoothing: 0.9,
+  bloomIntensity: 2.06,
+  bloomThreshold: 0,
+  bloomSmoothing: 0.71,
   brightnessContrastEnabled: false,
   brightness: 0,
   contrast: 0,
-  vignetteEnabled: false,
-  vignetteDarkness: 0.5,
+  vignetteEnabled: true,
+  vignetteDarkness: 0.57,
   vignetteOffset: 0.5,
   toneMappingEnabled: true,
   toneMappingMode: 'ACES_FILMIC' as ToneMappingModeName,
@@ -397,13 +397,13 @@ export const useDebugStore = create<DebugStore>()(
       // qualifying highlights actually glow visibly. Net result:
       // unchanged colours, visible "subtle glow on bright pixels"
       // exactly as the user asked.
-      bloomIntensity: 0.8,
+      bloomIntensity: 2.06,
       setBloomIntensity: (bloomIntensity) => set({ bloomIntensity }),
-      bloomThreshold: 0.85,
+      bloomThreshold: 0,
       setBloomThreshold: (bloomThreshold) => set({ bloomThreshold }),
       // 0.9 = soft cutoff at the threshold so surfaces near the
       // boundary don't pop/flicker as the camera moves.
-      bloomSmoothing: 0.9,
+      bloomSmoothing: 0.71,
       setBloomSmoothing: (bloomSmoothing) => set({ bloomSmoothing }),
       brightnessContrastEnabled: false,
       setBrightnessContrastEnabled: (brightnessContrastEnabled) => set({ brightnessContrastEnabled }),
@@ -411,9 +411,9 @@ export const useDebugStore = create<DebugStore>()(
       setBrightness: (brightness) => set({ brightness }),
       contrast: 0,
       setContrast: (contrast) => set({ contrast }),
-      vignetteEnabled: false,
+      vignetteEnabled: true,
       setVignetteEnabled: (vignetteEnabled) => set({ vignetteEnabled }),
-      vignetteDarkness: 0.5,
+      vignetteDarkness: 0.57,
       setVignetteDarkness: (vignetteDarkness) => set({ vignetteDarkness }),
       vignetteOffset: 0.5,
       setVignetteOffset: (vignetteOffset) => set({ vignetteOffset }),

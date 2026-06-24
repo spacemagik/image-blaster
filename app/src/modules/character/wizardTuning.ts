@@ -922,7 +922,7 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   controlMovementDuringJump: true,
   enableCharacterInertia: true,
 
-  dogHeight: 7.9,
+  dogHeight: 8.2,
   // The astronaut demo defaults this to 180 because its dog model's walk cycle points
   // legs in -mesh-Z. silo.glb (and previously wizard.glb) walks toward +mesh-Z, so 0 is
   // the correct default. If you swap in a different .glb that faces the opposite way,
@@ -998,7 +998,7 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   // ACES's saturation rolloff. Only genuine specular hits (already
   // ~0.85+ in LDR) get bumped over the threshold to bloom subtly,
   // preserving the actual colours of everything else.
-  splatBrightness: 1.05,
+  splatBrightness: 1.13,
 
   ambientIntensity: 0.83,
   sunIntensity: 1.62,
@@ -1076,7 +1076,7 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   // The preset+per-field values mirror SPARKLE_PRESETS.magic so toggling
   // enable shows the canonical magic look immediately; preset picker re-seeds
   // every per-field value below via `applySparklePreset`.
-  sparkleEnabled: false,
+  sparkleEnabled: true,
   sparklePreset: 'magic',
   // Character-following defaults: a 20m-radius / 2m-thick slab that rides
   // the player's feet (sparkleFollowCharacter=true below). Position fields
@@ -1094,8 +1094,8 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   sparkleRadius: 20,
   sparkleHeight: 1,
   sparkleDensity: 180,
-  sparkleMaxSplats: 8000,
-  sparkleOpacity: 0.92,
+  sparkleMaxSplats: 1900,
+  sparkleOpacity: 0.31,
   // Bumped 10× from the magic preset's 0.002/0.009. The original values
   // come from a near-camera viewer (sparkle.js demo) where you're looking
   // at the box from <1m away; at gameplay third-person distance they're
@@ -1103,10 +1103,10 @@ export const DEFAULT_WIZARD_TUNING: WizardTuning = {
   // from 3–5m without looking like floating beach balls.
   sparkleMinScale: 0.02,
   sparkleMaxScale: 0.06,
-  sparkleColor1: [0.85, 0.25, 1.0],
-  sparkleColor2: [1.0, 0.85, 0.1],
+  sparkleColor1: [1.0, 0.898, 0.239],
+  sparkleColor2: [1.0, 0.714, 0.102],
   sparkleFallVelocity: 0.04,
-  sparkleWanderScale: 0.025,
+  sparkleWanderScale: 0.043,
   sparkleWanderVariance: 4,
   sparkleFallDirX: 0,
   sparkleFallDirY: 1,
